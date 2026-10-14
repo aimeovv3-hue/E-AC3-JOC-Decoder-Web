@@ -35,8 +35,18 @@ jobs:
       - name: Publish CavernWebDecoder to WebAssembly
         run: dotnet publish CavernWebDecoder/CavernWebDecoder.csproj -c Release -o release_dist
 
-      - name: Add .nojekyll (so GitHub Pages serves _framework/ folder)
-        run: touch release_dist/wwwroot/.nojekyll
+      - name: Assemble GitHub Pages directory
+        run: |
+          mkdir -p pages_out
+          if [ -d "release_dist/AppBundle" ]; then
+            cp -r release_dist/AppBundle/* pages_out/ || true
+          fi
+          if [ -d "release_dist/wwwroot" ]; then
+            cp -r release_dist/wwwroot/* pages_out/ || true
+          fi
+          cp -r CavernWebDecoder/wwwroot/* pages_out/
+          touch pages_out/.nojekyll
+          ls -la pages_out
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5
@@ -44,7 +54,7 @@ jobs:
       - name: Upload artifact to GitHub Pages
         uses: actions/upload-pages-artifact@v3
         with:
-          path: release_dist/wwwroot
+          path: pages_out
 
       - name: Deploy to GitHub Pages
         id: deployment

@@ -1,0 +1,64 @@
+name: Build & Deploy Cavern E-AC3-JOC 22.2 Web Decoder
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Cavern Fork
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8.0 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install wasm-tools workload
+        run: dotnet workload install wasm-tools
+
+      - name: Publish CavernWebDecoder to WebAssembly
+        run: dotnet publish CavernWebDecoder/CavernWebDecoder.csproj -c Release -o release_dist
+
+      - name: Assemble GitHub Pages directory
+        run: |
+          mkdir -p pages_out
+          # Search ONLY inside release_dist for blazor.boot.json so we get the full published _framework bundle (including Cavern.wasm & Cavern.Format.wasm)
+          BOOT_JSON=$(find release_dist -name "blazor.boot.json" | head -n 1)
+          if [ -z "$BOOT_JSON" ]; then
+            BOOT_JSON=$(find release_dist -name "dotnet.js" | head -n 1)
+          fi
+          FRAMEWORK_DIR=$(dirname "$BOOT_JSON")
+          echo "Copying published _framework from: $FRAMEWORK_DIR"
+          cp -r "$FRAMEWORK_DIR" pages_out/_framework
+          cp -r CavernWebDecoder/wwwroot/* pages_out/
+          touch pages_out/.nojekyll
+          echo "=== Verifying pages_out/_framework contains blazor.boot.json and Cavern assemblies ==="
+          ls -la pages_out/_framework
+
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact to GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages_out
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

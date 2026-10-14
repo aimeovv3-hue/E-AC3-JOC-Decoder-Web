@@ -38,15 +38,14 @@ jobs:
       - name: Assemble GitHub Pages directory
         run: |
           mkdir -p pages_out
-          if [ -d "release_dist/AppBundle" ]; then
-            cp -r release_dist/AppBundle/* pages_out/ || true
-          fi
-          if [ -d "release_dist/wwwroot" ]; then
-            cp -r release_dist/wwwroot/* pages_out/ || true
-          fi
+          # Locate the generated _framework directory containing dotnet.js
+          FRAMEWORK_DIR=$(dirname $(find . -name "dotnet.js" | head -n 1))
+          echo "Found _framework at: $FRAMEWORK_DIR"
+          cp -r "$FRAMEWORK_DIR" pages_out/_framework
           cp -r CavernWebDecoder/wwwroot/* pages_out/
           touch pages_out/.nojekyll
           ls -la pages_out
+          ls -la pages_out/_framework
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5

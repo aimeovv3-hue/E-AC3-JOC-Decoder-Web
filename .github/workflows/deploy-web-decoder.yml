@@ -37,50 +37,41 @@ jobs:
           dotnet --version
           dotnet workload install wasm-tools
 
-      - name: Patch Cavern for High-Speed Native WASM AOT + SIMD
+      - name: Patch Cavern Parallelizer & Threading for Accurate Single-Threaded WASM
         run: |
           python3 - << 'EOF'
           import os, re
+
+          # 1. Replace Cavern's Parallelizer.cs with a 100% deterministic synchronous loop
+          # so every single JOC object and audio channel is completely rendered on every block.
+          parallelizer_path = "Cavern/Utilities/Threading/Parallelizer.cs"
+          if os.path.isfile(parallelizer_path):
+              with open(parallelizer_path, "w", encoding="utf-8") as f:
+                  f.write("""using System;
+
+          namespace Cavern.Utilities.Threading {
+              public sealed class Parallelizer : IDisposable {
+                  readonly Action<int> action;
+                  public Parallelizer(Action<int> action) => this.action = action;
+                  public void For(int start, int end) {
+                      for (int i = start; i < end; i++)
+                          action(i);
+                  }
+                  public static void For(int start, int end, Action<int> action) {
+                      for (int i = start; i < end; i++)
+                          action(i);
+                  }
+                  public void Dispose() { }
+              }
+          }
+          """)
+              print("[Patched] Cavern/Utilities/Threading/Parallelizer.cs -> deterministic synchronous loop")
 
           shim_code = """using System;
           using System.Collections.Generic;
           using System.Runtime.CompilerServices;
           using System.Threading;
           using System.Threading.Tasks;
-
-          internal sealed class CavernWasmResetEvent : IDisposable
-          {
-              public bool IsSet { get; private set; }
-              public int SpinCount { get; private set; }
-              public WaitHandle WaitHandle => null!;
-
-              public CavernWasmResetEvent() : this(false, 0) { }
-              public CavernWasmResetEvent(bool initialState) : this(initialState, 0) { }
-              public CavernWasmResetEvent(bool initialState, int spinCount)
-              {
-                  IsSet = initialState;
-                  SpinCount = spinCount;
-              }
-
-              [MethodImpl(MethodImplOptions.AggressiveInlining)]
-              public void Set() => IsSet = true;
-              [MethodImpl(MethodImplOptions.AggressiveInlining)]
-              public void Reset() => IsSet = false;
-              [MethodImpl(MethodImplOptions.AggressiveInlining)]
-              public void Wait() { }
-              [MethodImpl(MethodImplOptions.AggressiveInlining)]
-              public void Wait(CancellationToken cancellationToken) { }
-              [MethodImpl(MethodImplOptions.AggressiveInlining)]
-              public bool Wait(int millisecondsTimeout) => true;
-              [MethodImpl(MethodImplOptions.AggressiveInlining)]
-              public bool Wait(int millisecondsTimeout, CancellationToken cancellationToken) => true;
-              [MethodImpl(MethodImplOptions.AggressiveInlining)]
-              public bool Wait(TimeSpan timeout) => true;
-              [MethodImpl(MethodImplOptions.AggressiveInlining)]
-              public bool Wait(TimeSpan timeout, CancellationToken cancellationToken) => true;
-              [MethodImpl(MethodImplOptions.AggressiveInlining)]
-              public void Dispose() { }
-          }
 
           internal static class CavernWasmSync
           {
@@ -121,24 +112,6 @@ jobs:
                   for (int i = 0; i < actions.Length; i++) actions[i]?.Invoke();
               }
               [MethodImpl(MethodImplOptions.AggressiveInlining)]
-              public static bool QueueUserWorkItem(WaitCallback callBack)
-              {
-                  callBack?.Invoke(null);
-                  return true;
-              }
-              [MethodImpl(MethodImplOptions.AggressiveInlining)]
-              public static bool QueueUserWorkItem(WaitCallback callBack, object? state)
-              {
-                  callBack?.Invoke(state);
-                  return true;
-              }
-              [MethodImpl(MethodImplOptions.AggressiveInlining)]
-              public static bool QueueUserWorkItem<TState>(Action<TState> callBack, TState state, bool preferLocal)
-              {
-                  callBack?.Invoke(state);
-                  return true;
-              }
-              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static Task Run(Action action)
               {
                   action();
@@ -161,17 +134,6 @@ jobs:
                   return Task.FromResult(function());
               }
               [MethodImpl(MethodImplOptions.AggressiveInlining)]
-              public static Task StartNew(Action action)
-              {
-                  action();
-                  return Task.CompletedTask;
-              }
-              [MethodImpl(MethodImplOptions.AggressiveInlining)]
-              public static Task<TResult> StartNew<TResult>(Func<TResult> function)
-              {
-                  return Task.FromResult(function());
-              }
-              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static void WaitAll(params Task[] tasks)
               {
                   if (tasks == null) return;
@@ -180,17 +142,6 @@ jobs:
                       if (tasks[i] != null && tasks[i].Status == TaskStatus.Created)
                           tasks[i].RunSynchronously();
                   }
-              }
-              [MethodImpl(MethodImplOptions.AggressiveInlining)]
-              public static int WaitAny(params Task[] tasks)
-              {
-                  if (tasks == null || tasks.Length == 0) return -1;
-                  for (int i = 0; i < tasks.Length; i++)
-                  {
-                      if (tasks[i] != null && tasks[i].Status == TaskStatus.Created)
-                          tasks[i].RunSynchronously();
-                  }
-                  return 0;
               }
           }
           """
@@ -202,23 +153,18 @@ jobs:
 
               for root, _, files in os.walk(proj_dir):
                   for file in files:
-                      if not file.endswith(".cs") or file == "CavernWasmSync.cs":
+                      if not file.endswith(".cs") or file in ("CavernWasmSync.cs", "Parallelizer.cs"):
                           continue
                       path = os.path.join(root, file)
                       with open(path, "r", encoding="utf-8-sig") as f:
                           content = f.read()
 
                       orig = content
-                      content = re.sub(r'\bManualResetEventSlim\b', 'CavernWasmResetEvent', content)
                       content = re.sub(r'\bParallel\.For\b', 'CavernWasmSync.For', content)
                       content = re.sub(r'\bParallel\.ForEach\b', 'CavernWasmSync.ForEach', content)
                       content = re.sub(r'\bParallel\.Invoke\b', 'CavernWasmSync.Invoke', content)
-                      content = re.sub(r'\bThreadPool\.QueueUserWorkItem\b', 'CavernWasmSync.QueueUserWorkItem', content)
-                      content = re.sub(r'\bThreadPool\.UnsafeQueueUserWorkItem\b', 'CavernWasmSync.QueueUserWorkItem', content)
                       content = re.sub(r'\bTask\.Run\b', 'CavernWasmSync.Run', content)
-                      content = re.sub(r'\bTask\.Factory\.StartNew\b', 'CavernWasmSync.StartNew', content)
                       content = re.sub(r'\bTask\.WaitAll\b', 'CavernWasmSync.WaitAll', content)
-                      content = re.sub(r'\bTask\.WaitAny\b', 'CavernWasmSync.WaitAny', content)
 
                       if "Task" in content and "Stopwatch" not in content:
                           content = re.sub(r'\.Start\(\)', '.RunSynchronously()', content)
@@ -250,33 +196,15 @@ jobs:
             </ItemGroup>
           </Project>""")
 
-          # Remove setTimeout(0) throttle in worker.js and increase batch size to 48 frames
+          # Remove setTimeout(0) throttle in worker.js and process 32 frames per batch
           worker_path = "CavernWebDecoder/wwwroot/worker.js"
           if os.path.isfile(worker_path):
               with open(worker_path, "r", encoding="utf-8") as f:
                   w = f.read()
               w = w.replace("await new Promise((r) => setTimeout(r, 0));", "")
-              w = w.replace("const batchSizeFrames = 12;", "const batchSizeFrames = 48;")
-              w = w.replace("const batchSizeFrames = 32;", "const batchSizeFrames = 48;")
+              w = w.replace("const batchSizeFrames = 12;", "const batchSizeFrames = 32;")
               with open(worker_path, "w", encoding="utf-8") as f:
                   f.write(w)
-
-          # Use 1536 samples (1 full E-AC-3 frame) default UpdateRate in Program.cs & app.js
-          prog_path = "CavernWebDecoder/Program.cs"
-          if os.path.isfile(prog_path):
-              with open(prog_path, "r", encoding="utf-8") as f:
-                  p = f.read()
-              p = p.replace("updateRateSamples > 0 ? updateRateSamples : 256", "1536")
-              with open(prog_path, "w", encoding="utf-8") as f:
-                  f.write(p)
-
-          app_path = "CavernWebDecoder/wwwroot/app.js"
-          if os.path.isfile(app_path):
-              with open(app_path, "r", encoding="utf-8") as f:
-                  a = f.read()
-              a = a.replace("parseInt(updateRateSelect.value, 10) || 256", "1536")
-              with open(app_path, "w", encoding="utf-8") as f:
-                  f.write(a)
           EOF
 
       - name: Restore workloads & Publish CavernWebDecoder with LLVM AOT & SIMD128

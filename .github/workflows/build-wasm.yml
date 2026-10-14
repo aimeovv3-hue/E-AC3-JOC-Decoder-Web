@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -20,11 +21,15 @@ jobs:
       - name: Install WASM Tools
         run: dotnet workload install wasm-tools
 
-      - name: Publish Cavern Core and Formats for WASM
-        run: |
-          dotnet publish Cavern/Cavern.csproj -c Release -o output/wasm
-          dotnet publish CavernFormat/CavernFormat.csproj -c Release -o output/wasm
-          
+      - name: Restore dependencies
+        run: dotnet restore Cavern/Cavern.csproj
+
+      - name: Build project
+        run: dotnet build Cavern/Cavern.csproj -c Release --no-restore
+
+      - name: Publish Cavern for WASM
+        run: dotnet publish Cavern/Cavern.csproj -c Release -o output/wasm --nologo
+
       - name: Upload compiled artifacts
         uses: actions/upload-artifact@v4
         with:

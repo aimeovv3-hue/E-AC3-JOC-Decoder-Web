@@ -29,8 +29,13 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Install wasm-tools workload (LLVM AOT + WASM SIMD)
-        run: dotnet workload install wasm-tools
+      - name: Pin .NET 8 SDK & Install wasm-tools workload
+        run: |
+          DOTNET8_VER=$(dotnet --list-sdks | grep "^8\.0\." | tail -n 1 | awk '{print $1}')
+          echo "Pinning .NET SDK version to: $DOTNET8_VER"
+          printf '{"sdk":{"version":"%s","rollForward":"latestPatch"}}\n' "$DOTNET8_VER" > global.json
+          dotnet --version
+          dotnet workload install wasm-tools
 
       - name: Patch Cavern for High-Speed Native WASM AOT + SIMD
         run: |
@@ -222,7 +227,7 @@ jobs:
                           with open(path, "w", encoding="utf-8") as f:
                               f.write(content)
 
-          # Force LLVM AOT + WASM 128-bit SIMD + -O3 in CavernWebDecoder.csproj
+          # Configure CavernWebDecoder.csproj for LLVM AOT + WASM 128-bit SIMD
           csproj_path = "CavernWebDecoder/CavernWebDecoder.csproj"
           if os.path.isfile(csproj_path):
               with open(csproj_path, "w", encoding="utf-8") as f:
@@ -237,35 +242,26 @@ jobs:
               <WasmMainJSPath>wasm-main.js</WasmMainJSPath>
               <RunAOTCompilation>true</RunAOTCompilation>
               <WasmEnableSIMD>true</WasmEnableSIMD>
-              <WasmStripILAfterAOT>true</WasmStripILAfterAOT>
-              <PublishTrimmed>true</PublishTrimmed>
-              <TrimMode>partial</TrimMode>
               <InvariantGlobalization>true</InvariantGlobalization>
-              <EmccCompileOptimizationFlag>-O3</EmccCompileOptimizationFlag>
-              <EmccLinkOptimizationFlag>-O3</EmccLinkOptimizationFlag>
             </PropertyGroup>
-            <ItemGroup>
-              <TrimmerRootAssembly Include="Cavern" />
-              <TrimmerRootAssembly Include="Cavern.Format" />
-              <TrimmerRootAssembly Include="CavernWebDecoder" />
-            </ItemGroup>
             <ItemGroup>
               <ProjectReference Include="..\\Cavern\\Cavern.csproj" />
               <ProjectReference Include="..\\Cavern.Format\\Cavern.Format.csproj" />
             </ItemGroup>
           </Project>""")
 
-          # Remove setTimeout(0) throttle in worker.js and increase batch size to 32 frames
+          # Remove setTimeout(0) throttle in worker.js and increase batch size to 48 frames
           worker_path = "CavernWebDecoder/wwwroot/worker.js"
           if os.path.isfile(worker_path):
               with open(worker_path, "r", encoding="utf-8") as f:
                   w = f.read()
               w = w.replace("await new Promise((r) => setTimeout(r, 0));", "")
-              w = w.replace("const batchSizeFrames = 12;", "const batchSizeFrames = 32;")
+              w = w.replace("const batchSizeFrames = 12;", "const batchSizeFrames = 48;")
+              w = w.replace("const batchSizeFrames = 32;", "const batchSizeFrames = 48;")
               with open(worker_path, "w", encoding="utf-8") as f:
                   f.write(w)
 
-          # Set default UpdateRate to 1536 (1 full E-AC-3 frame per render call) for 6x faster spatial rendering
+          # Use 1536 samples (1 full E-AC-3 frame) default UpdateRate in Program.cs & app.js
           prog_path = "CavernWebDecoder/Program.cs"
           if os.path.isfile(prog_path):
               with open(prog_path, "r", encoding="utf-8") as f:
@@ -273,10 +269,20 @@ jobs:
               p = p.replace("updateRateSamples > 0 ? updateRateSamples : 256", "1536")
               with open(prog_path, "w", encoding="utf-8") as f:
                   f.write(p)
+
+          app_path = "CavernWebDecoder/wwwroot/app.js"
+          if os.path.isfile(app_path):
+              with open(app_path, "r", encoding="utf-8") as f:
+                  a = f.read()
+              a = a.replace("parseInt(updateRateSelect.value, 10) || 256", "1536")
+              with open(app_path, "w", encoding="utf-8") as f:
+                  f.write(a)
           EOF
 
-      - name: Publish CavernWebDecoder with LLVM AOT & SIMD128
-        run: dotnet publish CavernWebDecoder/CavernWebDecoder.csproj -c Release -o release_dist
+      - name: Restore workloads & Publish CavernWebDecoder with LLVM AOT & SIMD128
+        run: |
+          dotnet workload restore CavernWebDecoder/CavernWebDecoder.csproj
+          dotnet publish CavernWebDecoder/CavernWebDecoder.csproj -c Release -o release_dist
 
       - name: Assemble GitHub Pages directory
         run: |

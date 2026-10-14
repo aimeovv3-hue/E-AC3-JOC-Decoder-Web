@@ -5,8 +5,8 @@
     <OutputType>Exe</OutputType>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Nullable>enable</Nullable>
-    <WasmEnableSIMD>true</WasmEnableSIMD>
-    <PublishTrimmed>true</PublishTrimmed>
+    <WasmMainJSPath>wwwroot/main.js</WasmMainJSPath>
+    <PublishTrimmed>false</PublishTrimmed>
     <RunAOTCompilation>false</RunAOTCompilation>
   </PropertyGroup>
 

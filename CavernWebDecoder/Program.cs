@@ -1,10 +1,13 @@
 using System;
 using System.IO;
 using System.Runtime.InteropServices.JavaScript;
+using System.Runtime.Versioning;
 using Cavern;
 using Cavern.Channels;
 using Cavern.Format;
 using Cavern.Format.Renderers;
+
+[assembly: SupportedOSPlatform("browser")]
 
 public partial class Program
 {
@@ -49,7 +52,6 @@ public partial class Program
             if (printStderr)
                 OnLog($"[Cavern] Opening '{fileName}' ({inputBytes.Length} bytes)...", false);
 
-            // If the input is an MP4/M4A container, extract the raw ec-3 / ac-3 track if needed
             byte[] streamBytes = Mp4Ec3Extractor.ExtractIfMp4(inputBytes, fileName, printStderr, OnLog);
 
             using MemoryStream inputStream = new MemoryStream(streamBytes, writable: false);
@@ -60,13 +62,12 @@ public partial class Program
             int sampleRate = targetSampleRate > 0 ? targetSampleRate : reader.SampleRate;
             int updateRate = 1536; // 1 E-AC-3 frame = 1536 samples (6 blocks * 256 samples)
 
-            // Configure Target Output Layout (CICP -> Cavern Channels)
             ConfigureCicpLayout(cicpLayout);
             int outputChannels = Listener.Channels.Length;
 
             if (printStderr)
             {
-                OnLog($"[Cavern] Input SR: {reader.SampleRate} Hz, Length: {reader.Length} samples, JOC Dynamic Objects: {renderer.Objects.Count}", false);
+                OnLog($"[Cavern] Input SR: {reader.SampleRate} Hz, Length: {reader.Length} samples, JOC Objects: {renderer.Objects.Count}", false);
                 OnLog($"[Cavern] Target CICP {cicpLayout} -> {outputChannels} channels @ {sampleRate} Hz, {pcmBitDepth}-bit", false);
             }
 
@@ -152,20 +153,15 @@ public partial class Program
 
     private static float LoudnessToLinearGain(double targetLoudnessDb, int drcEffectType)
     {
-        // Reference dialnorm / loudness baseline (-24 LUFS / -24 dB)
         double offsetDb = 0.0;
         if (!double.IsNaN(targetLoudnessDb) && targetLoudnessDb != 0.0)
         {
             offsetDb = Math.Clamp(targetLoudnessDb - (-24.0), -18.0, 12.0);
         }
-        if (drcEffectType == 1) offsetDb -= 3.0; // Late night gentle attenuation
+        if (drcEffectType == 1) offsetDb -= 3.0;
         return (float)Math.Pow(10.0, offsetDb / 20.0);
     }
 
-    /// <summary>
-    /// Maps CICP layout index to Cavern's spherical channel layout.
-    /// CICP 13 is the 22.2 Surround (11/11.2) layout with 24 channels.
-    /// </summary>
     private static void ConfigureCicpLayout(int cicp)
     {
         switch (cicp)
@@ -188,24 +184,10 @@ public partial class Program
             case 19: // 7.1.4 Surround
                 Listener.ReplaceChannels(12);
                 break;
-            case 13: // 22.2 Surround • 11/11.2 (SMPTE 2036-2 / ITU-R BS.2051 System H)
+            case 13: // 22.2 Surround • 11/11.2 (24 channels)
             default:
-                // Cavern's built-in 24-channel matrix is 22.2 Surround!
-                // We also provide explicit 22.2 CICP 13 spherical coordinates if needed:
-                Listener.ReplaceChannels(GetCicp13Layout22_2());
+                Listener.ReplaceChannels(24);
                 break;
         }
-    }
-
-    /// <summary>
-    /// Returns the exact 24 channels for CICP 13 (22.2 Surround • 11/11.2)
-    /// Order per ITU-R BS.2051-3 System H (9+10+3.2 / 11/11.2):
-    /// X = Elevation (-90 to +90, negative is up in Cavern's left-handed Euler or standard Cavern Channel(x, y, lfe)),
-    /// Wait: Cavern's ChannelPrototype.GetStandardMatrix(24) already defines the official 22.2 layout!
-    /// We use ChannelPrototype.ToRaw(ChannelPrototype.GetStandardMatrix(24)) directly from Cavern.
-    /// </summary>
-    private static Channel[] GetCicp13Layout22_2()
-    {
-        return ChannelPrototype.ToRaw(ChannelPrototype.GetStandardMatrix(24));
     }
 }

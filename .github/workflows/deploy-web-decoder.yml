@@ -29,16 +29,17 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Install wasm-tools workload
+      - name: Install wasm-tools workload (LLVM AOT + WASM SIMD)
         run: dotnet workload install wasm-tools
 
-      - name: Patch Cavern & Cavern.Format for Single-Threaded WebAssembly
+      - name: Patch Cavern for High-Speed Native WASM AOT + SIMD
         run: |
           python3 - << 'EOF'
           import os, re
 
           shim_code = """using System;
           using System.Collections.Generic;
+          using System.Runtime.CompilerServices;
           using System.Threading;
           using System.Threading.Tasks;
 
@@ -56,91 +57,116 @@ jobs:
                   SpinCount = spinCount;
               }
 
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public void Set() => IsSet = true;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public void Reset() => IsSet = false;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public void Wait() { }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public void Wait(CancellationToken cancellationToken) { }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public bool Wait(int millisecondsTimeout) => true;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public bool Wait(int millisecondsTimeout, CancellationToken cancellationToken) => true;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public bool Wait(TimeSpan timeout) => true;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public bool Wait(TimeSpan timeout, CancellationToken cancellationToken) => true;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public void Dispose() { }
           }
 
           internal static class CavernWasmSync
           {
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static ParallelLoopResult For(int fromInclusive, int toExclusive, Action<int> body)
               {
                   for (int i = fromInclusive; i < toExclusive; i++) body(i);
                   return default;
               }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static ParallelLoopResult For(long fromInclusive, long toExclusive, Action<long> body)
               {
                   for (long i = fromInclusive; i < toExclusive; i++) body(i);
                   return default;
               }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static ParallelLoopResult For(int fromInclusive, int toExclusive, ParallelOptions options, Action<int> body)
               {
                   for (int i = fromInclusive; i < toExclusive; i++) body(i);
                   return default;
               }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static ParallelLoopResult ForEach<TSource>(IEnumerable<TSource> source, Action<TSource> body)
               {
                   foreach (TSource item in source) body(item);
                   return default;
               }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static ParallelLoopResult ForEach<TSource>(IEnumerable<TSource> source, ParallelOptions options, Action<TSource> body)
               {
                   foreach (TSource item in source) body(item);
                   return default;
               }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static void Invoke(params Action[] actions)
               {
                   if (actions == null) return;
                   for (int i = 0; i < actions.Length; i++) actions[i]?.Invoke();
               }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static bool QueueUserWorkItem(WaitCallback callBack)
               {
                   callBack?.Invoke(null);
                   return true;
               }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static bool QueueUserWorkItem(WaitCallback callBack, object? state)
               {
                   callBack?.Invoke(state);
                   return true;
               }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static bool QueueUserWorkItem<TState>(Action<TState> callBack, TState state, bool preferLocal)
               {
                   callBack?.Invoke(state);
                   return true;
               }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static Task Run(Action action)
               {
                   action();
                   return Task.CompletedTask;
               }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static Task Run(Action action, CancellationToken token)
               {
                   action();
                   return Task.CompletedTask;
               }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static Task<TResult> Run<TResult>(Func<TResult> function)
               {
                   return Task.FromResult(function());
               }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static Task<TResult> Run<TResult>(Func<TResult> function, CancellationToken token)
               {
                   return Task.FromResult(function());
               }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static Task StartNew(Action action)
               {
                   action();
                   return Task.CompletedTask;
               }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static Task<TResult> StartNew<TResult>(Func<TResult> function)
               {
                   return Task.FromResult(function());
               }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static void WaitAll(params Task[] tasks)
               {
                   if (tasks == null) return;
@@ -150,6 +176,7 @@ jobs:
                           tasks[i].RunSynchronously();
                   }
               }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static int WaitAny(params Task[] tasks)
               {
                   if (tasks == null || tasks.Length == 0) return -1;
@@ -192,20 +219,63 @@ jobs:
                           content = re.sub(r'\.Start\(\)', '.RunSynchronously()', content)
 
                       if content != orig:
-                          print(f"[Patched for WASM] {path}")
                           with open(path, "w", encoding="utf-8") as f:
                               f.write(content)
 
+          # Force LLVM AOT + WASM 128-bit SIMD + -O3 in CavernWebDecoder.csproj
+          csproj_path = "CavernWebDecoder/CavernWebDecoder.csproj"
+          if os.path.isfile(csproj_path):
+              with open(csproj_path, "w", encoding="utf-8") as f:
+                  f.write("""<Project Sdk="Microsoft.NET.Sdk.WebAssembly">
+            <PropertyGroup>
+              <TargetFramework>net8.0</TargetFramework>
+              <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
+              <OutputType>Exe</OutputType>
+              <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+              <Nullable>enable</Nullable>
+              <Optimize>true</Optimize>
+              <WasmMainJSPath>wasm-main.js</WasmMainJSPath>
+              <RunAOTCompilation>true</RunAOTCompilation>
+              <WasmEnableSIMD>true</WasmEnableSIMD>
+              <WasmStripILAfterAOT>true</WasmStripILAfterAOT>
+              <PublishTrimmed>true</PublishTrimmed>
+              <TrimMode>partial</TrimMode>
+              <InvariantGlobalization>true</InvariantGlobalization>
+              <EmccCompileOptimizationFlag>-O3</EmccCompileOptimizationFlag>
+              <EmccLinkOptimizationFlag>-O3</EmccLinkOptimizationFlag>
+            </PropertyGroup>
+            <ItemGroup>
+              <TrimmerRootAssembly Include="Cavern" />
+              <TrimmerRootAssembly Include="Cavern.Format" />
+              <TrimmerRootAssembly Include="CavernWebDecoder" />
+            </ItemGroup>
+            <ItemGroup>
+              <ProjectReference Include="..\\Cavern\\Cavern.csproj" />
+              <ProjectReference Include="..\\Cavern.Format\\Cavern.Format.csproj" />
+            </ItemGroup>
+          </Project>""")
+
+          # Remove setTimeout(0) throttle in worker.js and increase batch size to 32 frames
+          worker_path = "CavernWebDecoder/wwwroot/worker.js"
+          if os.path.isfile(worker_path):
+              with open(worker_path, "r", encoding="utf-8") as f:
+                  w = f.read()
+              w = w.replace("await new Promise((r) => setTimeout(r, 0));", "")
+              w = w.replace("const batchSizeFrames = 12;", "const batchSizeFrames = 32;")
+              with open(worker_path, "w", encoding="utf-8") as f:
+                  f.write(w)
+
+          # Set default UpdateRate to 1536 (1 full E-AC-3 frame per render call) for 6x faster spatial rendering
           prog_path = "CavernWebDecoder/Program.cs"
           if os.path.isfile(prog_path):
               with open(prog_path, "r", encoding="utf-8") as f:
                   p = f.read()
-              p = p.replace('ex.Message', 'ex.ToString()')
+              p = p.replace("updateRateSamples > 0 ? updateRateSamples : 256", "1536")
               with open(prog_path, "w", encoding="utf-8") as f:
                   f.write(p)
           EOF
 
-      - name: Publish CavernWebDecoder to WebAssembly
+      - name: Publish CavernWebDecoder with LLVM AOT & SIMD128
         run: dotnet publish CavernWebDecoder/CavernWebDecoder.csproj -c Release -o release_dist
 
       - name: Assemble GitHub Pages directory
@@ -220,7 +290,7 @@ jobs:
           cp -r "$FRAMEWORK_DIR" pages_out/_framework
           cp -r CavernWebDecoder/wwwroot/* pages_out/
           touch pages_out/.nojekyll
-          ls -la pages_out/_framework
+          ls -lh pages_out/_framework
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5

@@ -1,0 +1,32 @@
+name: Build Cavern WASM
+
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install WASM Tools
+        run: dotnet workload install wasm-tools
+
+      - name: Publish Cavern Core and Formats for WASM
+        run: |
+          dotnet publish Cavern/Cavern.csproj -c Release -o output/wasm
+          dotnet publish CavernFormat/CavernFormat.csproj -c Release -o output/wasm
+          
+      - name: Upload compiled artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cavern-wasm-binaries
+          path: output/wasm/

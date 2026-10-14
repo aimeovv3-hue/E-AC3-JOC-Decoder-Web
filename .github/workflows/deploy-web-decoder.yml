@@ -37,59 +37,50 @@ jobs:
           dotnet --version
           dotnet workload install wasm-tools
 
-      - name: Patch Cavern Parallelizer & Channel Matrices for WASM
+      - name: Patch Cavern & Channel Routing for WASM AOT + SIMD
         run: |
           python3 - << 'EOF'
           import os, re
-
-          # 1. Replace Parallelizer.cs with synchronous For AND ForUnchecked (instance + static)
-          parallelizer_path = "Cavern/Utilities/Threading/Parallelizer.cs"
-          if os.path.isfile(parallelizer_path):
-              with open(parallelizer_path, "w", encoding="utf-8") as f:
-                  f.write("""using System;
-          using System.Runtime.CompilerServices;
-
-          namespace Cavern.Utilities.Threading {
-              public sealed class Parallelizer : IDisposable {
-                  readonly Action<int> action;
-
-                  public Parallelizer(Action<int> action) => this.action = action;
-
-                  [MethodImpl(MethodImplOptions.AggressiveInlining)]
-                  public void For(int start, int end) {
-                      for (int i = start; i < end; i++)
-                          action(i);
-                  }
-
-                  [MethodImpl(MethodImplOptions.AggressiveInlining)]
-                  public void ForUnchecked(int start, int end) {
-                      for (int i = start; i < end; i++)
-                          action(i);
-                  }
-
-                  [MethodImpl(MethodImplOptions.AggressiveInlining)]
-                  public static void For(int start, int end, Action<int> action) {
-                      for (int i = start; i < end; i++)
-                          action(i);
-                  }
-
-                  [MethodImpl(MethodImplOptions.AggressiveInlining)]
-                  public static void ForUnchecked(int start, int end, Action<int> action) {
-                      for (int i = start; i < end; i++)
-                          action(i);
-                  }
-
-                  public void Dispose() { }
-              }
-          }
-          """)
-              print("[Patched] Parallelizer.cs with synchronous For and ForUnchecked")
 
           shim_code = """using System;
           using System.Collections.Generic;
           using System.Runtime.CompilerServices;
           using System.Threading;
           using System.Threading.Tasks;
+
+          internal sealed class CavernWasmResetEvent : IDisposable
+          {
+              public bool IsSet { get; private set; }
+              public int SpinCount { get; private set; }
+              public WaitHandle WaitHandle => null!;
+
+              public CavernWasmResetEvent() : this(false, 0) { }
+              public CavernWasmResetEvent(bool initialState) : this(initialState, 0) { }
+              public CavernWasmResetEvent(bool initialState, int spinCount)
+              {
+                  IsSet = initialState;
+                  SpinCount = spinCount;
+              }
+
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public void Set() => IsSet = true;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public void Reset() => IsSet = false;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public void Wait() { }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public void Wait(CancellationToken cancellationToken) { }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public bool Wait(int millisecondsTimeout) => true;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public bool Wait(int millisecondsTimeout, CancellationToken cancellationToken) => true;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public bool Wait(TimeSpan timeout) => true;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public bool Wait(TimeSpan timeout, CancellationToken cancellationToken) => true;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public void Dispose() { }
+          }
 
           internal static class CavernWasmSync
           {
@@ -130,6 +121,24 @@ jobs:
                   for (int i = 0; i < actions.Length; i++) actions[i]?.Invoke();
               }
               [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static bool QueueUserWorkItem(WaitCallback callBack)
+              {
+                  callBack?.Invoke(null);
+                  return true;
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static bool QueueUserWorkItem(WaitCallback callBack, object? state)
+              {
+                  callBack?.Invoke(state);
+                  return true;
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static bool QueueUserWorkItem<TState>(Action<TState> callBack, TState state, bool preferLocal)
+              {
+                  callBack?.Invoke(state);
+                  return true;
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static Task Run(Action action)
               {
                   action();
@@ -152,6 +161,17 @@ jobs:
                   return Task.FromResult(function());
               }
               [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static Task StartNew(Action action)
+              {
+                  action();
+                  return Task.CompletedTask;
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static Task<TResult> StartNew<TResult>(Func<TResult> function)
+              {
+                  return Task.FromResult(function());
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
               public static void WaitAll(params Task[] tasks)
               {
                   if (tasks == null) return;
@@ -160,6 +180,17 @@ jobs:
                       if (tasks[i] != null && tasks[i].Status == TaskStatus.Created)
                           tasks[i].RunSynchronously();
                   }
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static int WaitAny(params Task[] tasks)
+              {
+                  if (tasks == null || tasks.Length == 0) return -1;
+                  for (int i = 0; i < tasks.Length; i++)
+                  {
+                      if (tasks[i] != null && tasks[i].Status == TaskStatus.Created)
+                          tasks[i].RunSynchronously();
+                  }
+                  return 0;
               }
           }
           """
@@ -171,18 +202,23 @@ jobs:
 
               for root, _, files in os.walk(proj_dir):
                   for file in files:
-                      if not file.endswith(".cs") or file in ("CavernWasmSync.cs", "Parallelizer.cs"):
+                      if not file.endswith(".cs") or file == "CavernWasmSync.cs":
                           continue
                       path = os.path.join(root, file)
                       with open(path, "r", encoding="utf-8-sig") as f:
                           content = f.read()
 
                       orig = content
+                      content = re.sub(r'\bManualResetEventSlim\b', 'CavernWasmResetEvent', content)
                       content = re.sub(r'\bParallel\.For\b', 'CavernWasmSync.For', content)
                       content = re.sub(r'\bParallel\.ForEach\b', 'CavernWasmSync.ForEach', content)
                       content = re.sub(r'\bParallel\.Invoke\b', 'CavernWasmSync.Invoke', content)
+                      content = re.sub(r'\bThreadPool\.QueueUserWorkItem\b', 'CavernWasmSync.QueueUserWorkItem', content)
+                      content = re.sub(r'\bThreadPool\.UnsafeQueueUserWorkItem\b', 'CavernWasmSync.QueueUserWorkItem', content)
                       content = re.sub(r'\bTask\.Run\b', 'CavernWasmSync.Run', content)
+                      content = re.sub(r'\bTask\.Factory\.StartNew\b', 'CavernWasmSync.StartNew', content)
                       content = re.sub(r'\bTask\.WaitAll\b', 'CavernWasmSync.WaitAll', content)
+                      content = re.sub(r'\bTask\.WaitAny\b', 'CavernWasmSync.WaitAny', content)
 
                       if "Task" in content and "Stopwatch" not in content:
                           content = re.sub(r'\.Start\(\)', '.RunSynchronously()', content)
@@ -191,7 +227,7 @@ jobs:
                           with open(path, "w", encoding="utf-8") as f:
                               f.write(content)
 
-          # 2. Update Program.cs to use Cavern's native cubical channel matrices + SMPTE Ch 5/6 Side Surround order
+          # Update Program.cs: call ConfigureCavernizeLayout AFTER new Listener() & put Side Surrounds (Ls/Rs) on Ch 5 & 6
           prog_path = "CavernWebDecoder/Program.cs"
           with open(prog_path, "w", encoding="utf-8") as f:
               f.write("""using System;
@@ -254,26 +290,19 @@ jobs:
 
                   try
                   {
-                      byte[]? streamBytes = Mp4Ec3Extractor.ExtractIfMp4(inputBytes, fileName, false, (_, _) => { });
-                      if (streamBytes != null && streamBytes.Length > 0 && !ReferenceEquals(streamBytes, inputBytes))
-                      {
-                          _inputStream = new MemoryStream(streamBytes, writable: false);
-                      }
-                      else
-                      {
-                          _inputStream = new MemoryStream(inputBytes, writable: false);
-                      }
-
+                      // Open container natively first (MP4Reader, MatroskaReader, EnhancedAC3Reader, RIFFWaveReader)
                       try
                       {
+                          _inputStream = new MemoryStream(inputBytes, writable: false);
                           _reader = AudioReader.Open(_inputStream);
                           _reader.ReadHeader();
                           _renderer = _reader.GetRenderer();
                       }
                       catch
                       {
+                          byte[]? extractedEc3 = Mp4Ec3Extractor.ExtractIfMp4(inputBytes, fileName, false, (_, _) => { });
                           _inputStream?.Dispose();
-                          _inputStream = new MemoryStream(inputBytes, writable: false);
+                          _inputStream = new MemoryStream(extractedEc3 ?? inputBytes, writable: false);
                           _reader = AudioReader.Open(_inputStream);
                           _reader.ReadHeader();
                           _renderer = _reader.GetRenderer();
@@ -282,11 +311,9 @@ jobs:
                       _sampleRate = targetSampleRate > 0 ? targetSampleRate : _reader.SampleRate;
                       if (_sampleRate <= 0) _sampleRate = 48000;
 
+                      // E-AC-3 JOC has 256 samples per audio block (6 blocks = 1536 samples per frame)
                       _updateRate = (updateRateSamples > 0 && updateRateSamples <= 256) ? updateRateSamples : 256;
                       _pcmBitDepth = pcmBitDepth;
-
-                      bool binaural = ConfigureCavernizeLayout(targetLayout);
-                      _outputChannels = Listener.Channels.Length;
 
                       float linearVolume = (float)Math.Pow(10.0, Math.Clamp(gainDb, -40.0, 20.0) / 20.0);
 
@@ -299,6 +326,8 @@ jobs:
                           _ => QualityModes.Perfect
                       };
 
+                      // IMPORTANT: Create Listener FIRST, then call ConfigureCavernizeLayout (Listener.ReplaceChannels)
+                      // so Listener's constructor never overwrites the selected channel layout!
                       _listener = new Listener
                       {
                           SampleRate = _sampleRate,
@@ -307,7 +336,10 @@ jobs:
                           AudioQuality = quality,
                           LFESeparation = lfeSeparation
                       };
+
+                      bool binaural = ConfigureCavernizeLayout(targetLayout);
                       Listener.HeadphoneVirtualizer = binaural;
+                      _outputChannels = Listener.Channels.Length;
 
                       foreach (Source source in _renderer.Objects)
                       {
@@ -375,7 +407,7 @@ jobs:
                           float[] renderedBlock = _listener.Render();
                           long remaining = _totalSamplesPerChannel - _samplesRendered;
                           int samplesInBlock = (int)Math.Min(_updateRate, remaining);
-                          int floatCount = samplesInBlock * _outputChannels;
+                          int floatCount = Math.Min(renderedBlock.Length, samplesInBlock * _outputChannels);
 
                           byteOffset += ConvertFloatToPcmFast(renderedBlock, floatCount, _pcmBitDepth, _reusableBatchBuffer, byteOffset);
                           _samplesRendered += samplesInBlock;
@@ -461,10 +493,6 @@ jobs:
                   return offset - startOffset;
               }
 
-              /// <summary>
-              /// Uses Cavern's native ChannelPrototype matrices so the 3D cubical panner has zero dead zones,
-              /// and places Side Surrounds (SL/SR, where Atmos backing/hidden vocals reside) on Channels 5 & 6.
-              /// </summary>
               private static bool ConfigureCavernizeLayout(string layoutKey)
               {
                   switch (layoutKey)
@@ -515,7 +543,7 @@ jobs:
                   Channel[] ch = Listener.Channels;
                   if (ch.Length >= 8)
                   {
-                      // Swap Rear (index 4, 5) with Side (index 6, 7) so Ch 5 & 6 are Side Surrounds (Ls/Rs)
+                      // Swap Rear (index 4, 5) with Side (index 6, 7) so Channels 5 & 6 are Side Surrounds (Ls/Rs)
                       (ch[4], ch[6]) = (ch[6], ch[4]);
                       (ch[5], ch[7]) = (ch[7], ch[5]);
                   }
@@ -523,7 +551,7 @@ jobs:
           }
           """)
 
-          # 3. Configure CavernWebDecoder.csproj for LLVM AOT + WASM 128-bit SIMD
+          # Configure CavernWebDecoder.csproj for LLVM AOT + WASM 128-bit SIMD
           csproj_path = "CavernWebDecoder/CavernWebDecoder.csproj"
           if os.path.isfile(csproj_path):
               with open(csproj_path, "w", encoding="utf-8") as f:
@@ -546,7 +574,7 @@ jobs:
             </ItemGroup>
           </Project>""")
 
-          # 4. Remove setTimeout(0) throttle in worker.js and process 32 frames per batch
+          # Remove setTimeout(0) throttle in worker.js and process 32 frames per batch
           worker_path = "CavernWebDecoder/wwwroot/worker.js"
           if os.path.isfile(worker_path):
               with open(worker_path, "r", encoding="utf-8") as f:

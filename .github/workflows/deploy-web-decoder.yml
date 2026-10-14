@@ -37,35 +37,53 @@ jobs:
           dotnet --version
           dotnet workload install wasm-tools
 
-      - name: Patch Cavern Parallelizer & Threading for Accurate Single-Threaded WASM
+      - name: Patch Cavern Parallelizer & Channel Matrices for WASM
         run: |
           python3 - << 'EOF'
           import os, re
 
-          # 1. Replace Cavern's Parallelizer.cs with a 100% deterministic synchronous loop
-          # so every single JOC object and audio channel is completely rendered on every block.
+          # 1. Replace Parallelizer.cs with synchronous For AND ForUnchecked (instance + static)
           parallelizer_path = "Cavern/Utilities/Threading/Parallelizer.cs"
           if os.path.isfile(parallelizer_path):
               with open(parallelizer_path, "w", encoding="utf-8") as f:
                   f.write("""using System;
+          using System.Runtime.CompilerServices;
 
           namespace Cavern.Utilities.Threading {
               public sealed class Parallelizer : IDisposable {
                   readonly Action<int> action;
+
                   public Parallelizer(Action<int> action) => this.action = action;
+
+                  [MethodImpl(MethodImplOptions.AggressiveInlining)]
                   public void For(int start, int end) {
                       for (int i = start; i < end; i++)
                           action(i);
                   }
+
+                  [MethodImpl(MethodImplOptions.AggressiveInlining)]
+                  public void ForUnchecked(int start, int end) {
+                      for (int i = start; i < end; i++)
+                          action(i);
+                  }
+
+                  [MethodImpl(MethodImplOptions.AggressiveInlining)]
                   public static void For(int start, int end, Action<int> action) {
                       for (int i = start; i < end; i++)
                           action(i);
                   }
+
+                  [MethodImpl(MethodImplOptions.AggressiveInlining)]
+                  public static void ForUnchecked(int start, int end, Action<int> action) {
+                      for (int i = start; i < end; i++)
+                          action(i);
+                  }
+
                   public void Dispose() { }
               }
           }
           """)
-              print("[Patched] Cavern/Utilities/Threading/Parallelizer.cs -> deterministic synchronous loop")
+              print("[Patched] Parallelizer.cs with synchronous For and ForUnchecked")
 
           shim_code = """using System;
           using System.Collections.Generic;
@@ -173,7 +191,339 @@ jobs:
                           with open(path, "w", encoding="utf-8") as f:
                               f.write(content)
 
-          # Configure CavernWebDecoder.csproj for LLVM AOT + WASM 128-bit SIMD
+          # 2. Update Program.cs to use Cavern's native cubical channel matrices + SMPTE Ch 5/6 Side Surround order
+          prog_path = "CavernWebDecoder/Program.cs"
+          with open(prog_path, "w", encoding="utf-8") as f:
+              f.write("""using System;
+          using System.IO;
+          using System.Runtime.CompilerServices;
+          using System.Runtime.InteropServices.JavaScript;
+          using System.Runtime.Versioning;
+          using Cavern;
+          using Cavern.Channels;
+          using Cavern.Format;
+          using Cavern.Format.Renderers;
+
+          [assembly: SupportedOSPlatform("browser")]
+
+          public partial class Program
+          {
+              private static MemoryStream? _inputStream;
+              private static AudioReader? _reader;
+              private static Renderer? _renderer;
+              private static Listener? _listener;
+
+              private static int _outputChannels = 24;
+              private static int _sampleRate = 48000;
+              private static int _pcmBitDepth = 24;
+              private static int _updateRate = 256;
+              private static long _totalSamplesPerChannel = 0;
+              private static long _samplesRendered = 0;
+              private static int _totalFrames = 0;
+              private static string _lastLog = "";
+              private static string _lastError = "";
+              private static byte[]? _reusableBatchBuffer;
+
+              public static void Main()
+              {
+                  Console.WriteLine("[Cavernize WASM AOT+SIMD] E-AC-3 JOC Decoder ready.");
+              }
+
+              [JSExport] public static string GetLastLog() => _lastLog;
+              [JSExport] public static string GetLastError() => _lastError;
+              [JSExport] public static int GetOutputChannels() => _outputChannels;
+              [JSExport] public static int GetSampleRate() => _sampleRate;
+              [JSExport] public static int GetTotalFrames() => _totalFrames;
+              [JSExport] public static int GetFramesProcessed() => (int)(_samplesRendered / 1536);
+
+              [JSExport]
+              public static int InitSession(
+                  byte[] inputBytes,
+                  string fileName,
+                  string targetLayout,
+                  int pcmBitDepth,
+                  int targetSampleRate,
+                  int updateRateSamples,
+                  int audioQualityIndex,
+                  double gainDb,
+                  bool lfeSeparation)
+              {
+                  CloseSession();
+                  _lastError = "";
+                  _lastLog = "";
+
+                  try
+                  {
+                      byte[]? streamBytes = Mp4Ec3Extractor.ExtractIfMp4(inputBytes, fileName, false, (_, _) => { });
+                      if (streamBytes != null && streamBytes.Length > 0 && !ReferenceEquals(streamBytes, inputBytes))
+                      {
+                          _inputStream = new MemoryStream(streamBytes, writable: false);
+                      }
+                      else
+                      {
+                          _inputStream = new MemoryStream(inputBytes, writable: false);
+                      }
+
+                      try
+                      {
+                          _reader = AudioReader.Open(_inputStream);
+                          _reader.ReadHeader();
+                          _renderer = _reader.GetRenderer();
+                      }
+                      catch
+                      {
+                          _inputStream?.Dispose();
+                          _inputStream = new MemoryStream(inputBytes, writable: false);
+                          _reader = AudioReader.Open(_inputStream);
+                          _reader.ReadHeader();
+                          _renderer = _reader.GetRenderer();
+                      }
+
+                      _sampleRate = targetSampleRate > 0 ? targetSampleRate : _reader.SampleRate;
+                      if (_sampleRate <= 0) _sampleRate = 48000;
+
+                      _updateRate = (updateRateSamples > 0 && updateRateSamples <= 256) ? updateRateSamples : 256;
+                      _pcmBitDepth = pcmBitDepth;
+
+                      bool binaural = ConfigureCavernizeLayout(targetLayout);
+                      _outputChannels = Listener.Channels.Length;
+
+                      float linearVolume = (float)Math.Pow(10.0, Math.Clamp(gainDb, -40.0, 20.0) / 20.0);
+
+                      QualityModes quality = audioQualityIndex switch
+                      {
+                          0 => QualityModes.Low,
+                          1 => QualityModes.Medium,
+                          2 => QualityModes.High,
+                          3 => QualityModes.Perfect,
+                          _ => QualityModes.Perfect
+                      };
+
+                      _listener = new Listener
+                      {
+                          SampleRate = _sampleRate,
+                          UpdateRate = _updateRate,
+                          Volume = linearVolume,
+                          AudioQuality = quality,
+                          LFESeparation = lfeSeparation
+                      };
+                      Listener.HeadphoneVirtualizer = binaural;
+
+                      foreach (Source source in _renderer.Objects)
+                      {
+                          _listener.AttachSource(source);
+                      }
+
+                      _totalSamplesPerChannel = _reader.Length;
+                      if (_totalSamplesPerChannel > 0 && _sampleRate != _reader.SampleRate && _reader.SampleRate > 0)
+                      {
+                          _totalSamplesPerChannel = (long)((double)_reader.Length * _sampleRate / _reader.SampleRate);
+                      }
+
+                      if (_totalSamplesPerChannel <= 0 && _inputStream != null)
+                      {
+                          long estimatedFrames = Math.Max(1, _inputStream.Length / 1536);
+                          _totalSamplesPerChannel = estimatedFrames * 1536;
+                      }
+
+                      _samplesRendered = 0;
+                      _totalFrames = (int)Math.Max(1, (_totalSamplesPerChannel + 1535) / 1536);
+
+                      _lastLog = $"[Cavernize] '{fileName}' | SR: {_reader.SampleRate} Hz | JOC Objects: {_renderer.Objects.Count} | Layout: {targetLayout} ({_outputChannels} ch) | UpdateRate: {_updateRate} | Frames: {_totalFrames}";
+                      return _totalFrames;
+                  }
+                  catch (Exception ex)
+                  {
+                      _lastError = $"{ex}";
+                      Console.Error.WriteLine($"[Cavernize Init Error] {ex}");
+                      CloseSession();
+                      return -1;
+                  }
+              }
+
+              [JSExport]
+              public static byte[] RenderNextBatch(int framesToRender)
+              {
+                  if (_listener == null || _reader == null || _inputStream == null)
+                      return Array.Empty<byte>();
+
+                  if (_samplesRendered >= _totalSamplesPerChannel)
+                      return Array.Empty<byte>();
+
+                  try
+                  {
+                      int bytesPerSample = _pcmBitDepth >> 3;
+                      long targetSamples = Math.Min(_totalSamplesPerChannel - _samplesRendered, (long)framesToRender * 1536);
+                      if (targetSamples <= 0)
+                          return Array.Empty<byte>();
+
+                      int blocks = (int)((targetSamples + _updateRate - 1) / _updateRate);
+                      int requiredBytes = blocks * _updateRate * _outputChannels * bytesPerSample;
+
+                      if (_reusableBatchBuffer == null || _reusableBatchBuffer.Length != requiredBytes)
+                      {
+                          _reusableBatchBuffer = new byte[requiredBytes];
+                      }
+
+                      int byteOffset = 0;
+
+                      for (int b = 0; b < blocks; b++)
+                      {
+                          if (_samplesRendered >= _totalSamplesPerChannel)
+                              break;
+
+                          float[] renderedBlock = _listener.Render();
+                          long remaining = _totalSamplesPerChannel - _samplesRendered;
+                          int samplesInBlock = (int)Math.Min(_updateRate, remaining);
+                          int floatCount = samplesInBlock * _outputChannels;
+
+                          byteOffset += ConvertFloatToPcmFast(renderedBlock, floatCount, _pcmBitDepth, _reusableBatchBuffer, byteOffset);
+                          _samplesRendered += samplesInBlock;
+                      }
+
+                      if (byteOffset == _reusableBatchBuffer.Length)
+                          return _reusableBatchBuffer;
+
+                      byte[] trimmed = new byte[byteOffset];
+                      Buffer.BlockCopy(_reusableBatchBuffer, 0, trimmed, 0, byteOffset);
+                      return trimmed;
+                  }
+                  catch (Exception ex)
+                  {
+                      _lastError = $"Render error at frame {GetFramesProcessed()}: {ex}";
+                      Console.Error.WriteLine(_lastError);
+                      return Array.Empty<byte>();
+                  }
+              }
+
+              [JSExport]
+              public static void CloseSession()
+              {
+                  try { _reader?.Dispose(); } catch { }
+                  try { _inputStream?.Dispose(); } catch { }
+                  _reader = null;
+                  _renderer = null;
+                  _listener = null;
+                  _inputStream = null;
+                  _reusableBatchBuffer = null;
+              }
+
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              private static unsafe int ConvertFloatToPcmFast(float[] samples, int count, int bitDepth, byte[] dest, int offset)
+              {
+                  int startOffset = offset;
+                  fixed (float* srcPtr = samples)
+                  fixed (byte* dstBase = dest)
+                  {
+                      byte* dst = dstBase + offset;
+                      switch (bitDepth)
+                      {
+                          case 24:
+                              for (int i = 0; i < count; i++)
+                              {
+                                  float s = srcPtr[i];
+                                  if (s > 1f) s = 1f;
+                                  else if (s < -1f) s = -1f;
+                                  int val = (int)(s * 8388607f);
+                                  dst[0] = (byte)val;
+                                  dst[1] = (byte)(val >> 8);
+                                  dst[2] = (byte)(val >> 16);
+                                  dst += 3;
+                              }
+                              return count * 3;
+
+                          case 16:
+                              short* dst16 = (short*)dst;
+                              for (int i = 0; i < count; i++)
+                              {
+                                  float s = srcPtr[i];
+                                  if (s > 1f) s = 1f;
+                                  else if (s < -1f) s = -1f;
+                                  dst16[i] = (short)(s * 32767f);
+                              }
+                              return count * 2;
+
+                          case 32:
+                              Buffer.MemoryCopy(srcPtr, dst, count * 4, count * 4);
+                              return count * 4;
+
+                          case 8:
+                              for (int i = 0; i < count; i++)
+                              {
+                                  float s = srcPtr[i];
+                                  if (s > 1f) s = 1f;
+                                  else if (s < -1f) s = -1f;
+                                  dst[i] = (byte)((s + 1f) * 127.5f);
+                              }
+                              return count;
+                      }
+                  }
+                  return offset - startOffset;
+              }
+
+              /// <summary>
+              /// Uses Cavern's native ChannelPrototype matrices so the 3D cubical panner has zero dead zones,
+              /// and places Side Surrounds (SL/SR, where Atmos backing/hidden vocals reside) on Channels 5 & 6.
+              /// </summary>
+              private static bool ConfigureCavernizeLayout(string layoutKey)
+              {
+                  switch (layoutKey)
+                  {
+                      case "virtualizer":
+                          Listener.ReplaceChannels(2);
+                          return true;
+                      case "2.0":
+                          Listener.ReplaceChannels(2);
+                          return false;
+                      case "4.0":
+                          Listener.ReplaceChannels(4);
+                          return false;
+                      case "5.1":
+                          Listener.ReplaceChannels(6);
+                          return false;
+                      case "7.1":
+                          SetCavernMatrixWithSmpteSurroundOrder(8);
+                          return false;
+                      case "5.1.2":
+                          Listener.ReplaceChannels(8);
+                          return false;
+                      case "5.1.4":
+                          Listener.ReplaceChannels(10);
+                          return false;
+                      case "7.1.2":
+                          SetCavernMatrixWithSmpteSurroundOrder(10);
+                          return false;
+                      case "7.1.4":
+                          SetCavernMatrixWithSmpteSurroundOrder(12);
+                          return false;
+                      case "7.1.6":
+                          SetCavernMatrixWithSmpteSurroundOrder(14);
+                          return false;
+                      case "9.1.6":
+                          SetCavernMatrixWithSmpteSurroundOrder(16);
+                          return false;
+                      case "22.2":
+                      default:
+                          Listener.ReplaceChannels(24);
+                          return false;
+                  }
+              }
+
+              private static void SetCavernMatrixWithSmpteSurroundOrder(int count)
+              {
+                  Listener.ReplaceChannels(count);
+                  Channel[] ch = Listener.Channels;
+                  if (ch.Length >= 8)
+                  {
+                      // Swap Rear (index 4, 5) with Side (index 6, 7) so Ch 5 & 6 are Side Surrounds (Ls/Rs)
+                      (ch[4], ch[6]) = (ch[6], ch[4]);
+                      (ch[5], ch[7]) = (ch[7], ch[5]);
+                  }
+              }
+          }
+          """)
+
+          # 3. Configure CavernWebDecoder.csproj for LLVM AOT + WASM 128-bit SIMD
           csproj_path = "CavernWebDecoder/CavernWebDecoder.csproj"
           if os.path.isfile(csproj_path):
               with open(csproj_path, "w", encoding="utf-8") as f:
@@ -196,7 +546,7 @@ jobs:
             </ItemGroup>
           </Project>""")
 
-          # Remove setTimeout(0) throttle in worker.js and process 32 frames per batch
+          # 4. Remove setTimeout(0) throttle in worker.js and process 32 frames per batch
           worker_path = "CavernWebDecoder/wwwroot/worker.js"
           if os.path.isfile(worker_path):
               with open(worker_path, "r", encoding="utf-8") as f:

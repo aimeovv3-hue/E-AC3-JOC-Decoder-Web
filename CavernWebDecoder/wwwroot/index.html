@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>E-AC3-JOC 3D Web Decoder</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="app-container">
+    <h1 class="app-title">E-AC3-JOC 3D Web<br>Decoder</h1>
+
+    <!-- Real-time FPS Badge (shown while processing, matching screenshot 3) -->
+    <div id="fpsBadge" class="fps-badge hidden" aria-live="polite">
+      <svg class="fps-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1Z" class="hidden"/>
+        <path d="M12 4a8 8 0 0 0-8 8c0 2.2.9 4.2 2.3 5.7h11.4c1.4-1.5 2.3-3.5 2.3-5.7a8 8 0 0 0-8-8Z"/>
+        <path d="m12 12 3.5-3.5"/>
+      </svg>
+      <div class="fps-text">
+        <div class="fps-value"><span id="fpsNumber">0.0</span> fps</div>
+        <div class="fps-label">Real-time speed</div>
+      </div>
+    </div>
+
+    <!-- Main Input & Queue Card (matching screenshots 1, 3, 4) -->
+    <section class="card">
+      <input type="file" id="fileInput" multiple accept=".ec3,.eac3,.ac3,.m4a,.mp4,.mkv,.mka,.webm,.wav" hidden />
+
+      <!-- Dropzone (hidden while actively processing just like screenshot 3) -->
+      <div id="dropzone" class="dropzone" role="button" tabindex="0">
+        <!-- Empty state (screenshot 4 top) -->
+        <div id="dropzoneEmpty" class="dropzone-content">
+          <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="12" y1="18" x2="12" y2="12"/>
+            <polyline points="9 15 12 12 15 15"/>
+          </svg>
+          <div class="dropzone-texts">
+            <div class="dropzone-title">Select input files</div>
+            <div class="dropzone-subtitle">Drag &amp; drop or click to browse</div>
+          </div>
+        </div>
+
+        <!-- Selected state (screenshot 1) -->
+        <div id="dropzoneSelected" class="dropzone-content selected-mode hidden">
+          <svg class="dropzone-icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <polyline points="4 7 7 10 11 5"/>
+            <line x1="14" y1="8" x2="20" y2="8"/>
+            <polyline points="4 16 7 19 11 14"/>
+            <line x1="14" y1="17" x2="20" y2="17"/>
+          </svg>
+          <span id="selectedCountText" class="selected-count-text">1 file selected</span>
+        </div>
+      </div>
+
+      <!-- Queue List (shown when files are selected or processing) -->
+      <div id="queueContainer" class="queue-container hidden">
+        <div id="queueList" class="queue-list"></div>
+
+        <div class="queue-actions">
+          <button id="startBtn" class="btn-primary-pill" title="Start decoding">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="7 5 18 12 7 19 7 5"/>
+            </svg>
+          </button>
+
+          <button id="cancelBtn" class="btn-cancel-pill hidden">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2">
+              <line x1="18" y1="6" x2="6" y2="18"/>
+              <line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+            <span>Cancel</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="local-info">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">
+          <circle cx="12" cy="12" r="9"/>
+          <line x1="12" y1="16" x2="12" y2="12"/>
+          <line x1="12" y1="8" x2="12.01" y2="8"/>
+        </svg>
+        <span>All files are processed locally in your browser</span>
+      </div>
+    </section>
+
+    <!-- Decoded Audio Files Card (matching screenshot 4) -->
+    <section id="decodedSection" class="card hidden">
+      <div class="decoded-header">
+        <div class="decoded-header-left">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+            <polyline points="9 14 11 16 15 12"/>
+          </svg>
+          <h2>Decoded audio files</h2>
+        </div>
+        <button id="clearDecodedBtn" class="icon-btn" title="Clear decoded list">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="4" y1="7" x2="20" y2="7"/>
+            <line x1="4" y1="12" x2="16" y2="12"/>
+            <line x1="4" y1="17" x2="12" y2="17"/>
+          </svg>
+        </button>
+      </div>
+      <div id="decodedList" class="decoded-list"></div>
+    </section>
+
+    <!-- Target Output Layout & Advanced Options Card (matching screenshots 1 & 2) -->
+    <section class="card settings-card">
+      <div class="m3-field">
+        <label for="cicpSelect" class="m3-floating-label">Target output layout (CICP)</label>
+        <div class="select-wrapper">
+          <select id="cicpSelect" class="m3-select">
+            <option value="13" selected>22.2 surround • 11/11.2</option>
+            <option value="19">7.1.4 surround • 7/4.1</option>
+            <option value="16">5.1.4 surround • 5/4.1</option>
+            <option value="14">5.1.2 surround • 5/2.1</option>
+            <option value="12">7.1 surround • 7/0.1</option>
+            <option value="6">5.1 surround • 5/0.1</option>
+            <option value="2">2.0 stereo • 2/0</option>
+          </select>
+          <svg class="select-arrow" viewBox="0 0 24 24" width="18" height="18">
+            <path d="M7 10l5 5 5-5z" fill="currentColor"/>
+          </svg>
+        </div>
+      </div>
+
+      <button id="advancedToggle" class="advanced-toggle" aria-expanded="false">
+        <span>Advanced options</span>
+        <svg id="advancedChevron" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </button>
+
+      <div id="advancedPanel" class="advanced-panel hidden">
+        <div class="m3-box-field">
+          <div class="select-wrapper">
+            <select id="pcmWordSize" class="m3-select-box">
+              <option value="" disabled>PCM word size</option>
+              <option value="24" selected>PCM word size: 24-bit integer</option>
+              <option value="16">PCM word size: 16-bit integer</option>
+              <option value="32">PCM word size: 32-bit float</option>
+            </select>
+            <svg class="select-arrow" viewBox="0 0 24 24" width="18" height="18">
+              <path d="M7 10l5 5 5-5z" fill="currentColor"/>
+            </svg>
+          </div>
+        </div>
+
+        <div class="m3-box-field">
+          <div class="select-wrapper">
+            <select id="outputSampleRate" class="m3-select-box">
+              <option value="0" selected>Output sample rate: Original (48000 Hz)</option>
+              <option value="44100">Output sample rate: 44100 Hz</option>
+              <option value="48000">Output sample rate: 48000 Hz</option>
+              <option value="96000">Output sample rate: 96000 Hz</option>
+            </select>
+            <svg class="select-arrow" viewBox="0 0 24 24" width="18" height="18">
+              <path d="M7 10l5 5 5-5z" fill="currentColor"/>
+            </svg>
+          </div>
+        </div>
+
+        <div class="m3-box-field">
+          <input type="number" id="targetLoudness" class="m3-input-box" placeholder="Target loudness (dB)" step="0.5" min="-40" max="0" />
+        </div>
+
+        <div class="m3-box-field">
+          <div class="select-wrapper">
+            <select id="drcEffectType" class="m3-select-box">
+              <option value="0" selected>DRC effect type: None</option>
+              <option value="1">DRC effect type: Night / Late Night</option>
+              <option value="2">DRC effect type: Noisy environment</option>
+              <option value="3">DRC effect type: Limited playback range</option>
+              <option value="6">DRC effect type: General compression</option>
+            </select>
+            <svg class="select-arrow" viewBox="0 0 24 24" width="18" height="18">
+              <path d="M7 10l5 5 5-5z" fill="currentColor"/>
+            </svg>
+          </div>
+        </div>
+
+        <label class="switch-row" for="stderrSwitch">
+          <input type="checkbox" id="stderrSwitch" checked />
+          <span class="m3-switch"></span>
+          <span class="switch-label">Print stderr to logs</span>
+        </label>
+
+        <button id="loadErudaBtn" type="button" class="btn-eruda">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="8" y="6" width="8" height="14" rx="4"/>
+            <path d="m19 7-3 2"/>
+            <path d="m5 7 3 2"/>
+            <path d="m19 19-3-2"/>
+            <path d="m5 19 3-2"/>
+            <path d="M20 13h-4"/>
+            <path d="M4 13h4"/>
+            <path d="m10 4 1 2"/>
+            <path d="m14 4-1 2"/>
+          </svg>
+          <span>Load Eruda</span>
+        </button>
+      </div>
+    </section>
+
+    <footer class="app-footer">
+      This website uses <a href="https://github.com/VoidXH/Cavern" target="_blank" rel="noopener">Cavern (Cavernize)</a> distributed under the
+      <a href="https://github.com/VoidXH/Cavern/blob/master/LICENSE.md" target="_blank" rel="noopener">MIT License</a>.
+      See <a href="https://github.com/VoidXH/Cavern/blob/master/LICENSE.md" target="_blank" rel="noopener">LICENSE</a> for more information.
+    </footer>
+  </main>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>

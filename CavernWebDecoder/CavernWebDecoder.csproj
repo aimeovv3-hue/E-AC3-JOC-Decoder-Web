@@ -5,7 +5,7 @@
     <OutputType>Exe</OutputType>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Nullable>enable</Nullable>
-    <WasmMainJSPath>wwwroot/main.js</WasmMainJSPath>
+    <WasmMainJSPath>wasm-main.js</WasmMainJSPath>
     <PublishTrimmed>false</PublishTrimmed>
     <RunAOTCompilation>false</RunAOTCompilation>
   </PropertyGroup>

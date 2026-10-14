@@ -48,7 +48,6 @@ body {
   margin-bottom: 4px;
 }
 
-/* Real-time FPS Badge (Screenshot 3) */
 .fps-badge {
   align-self: center;
   background-color: var(--badge-purple);
@@ -79,7 +78,17 @@ body {
   margin-top: 2px;
 }
 
-/* Card container */
+.error-banner {
+  background-color: #3b1414;
+  border: 1px solid #f2b8b5;
+  color: #f9dedc;
+  border-radius: 12px;
+  padding: 12px 16px;
+  font-size: 0.85rem;
+  font-family: 'JetBrains Mono', monospace;
+  word-break: break-word;
+}
+
 .card {
   background-color: var(--card-bg);
   border: 1px solid var(--card-border);
@@ -90,7 +99,6 @@ body {
   gap: 18px;
 }
 
-/* Dropzone */
 .dropzone {
   border: 1.5px dashed var(--outline);
   border-radius: 12px;
@@ -143,7 +151,6 @@ body {
   color: var(--text-main);
 }
 
-/* Queue List */
 .queue-container {
   display: flex;
   flex-direction: column;
@@ -178,7 +185,6 @@ body {
   flex-shrink: 0;
 }
 
-/* Material 3 scalloped spinner (Screenshot 3) */
 .m3-spinner {
   width: 28px;
   height: 28px;
@@ -263,7 +269,6 @@ body {
   line-height: 1.35;
 }
 
-/* Decoded Audio Files Card (Screenshot 4) */
 .decoded-header {
   display: flex;
   align-items: center;
@@ -343,7 +348,6 @@ body {
   border-radius: 999px;
 }
 
-/* Settings & Outlined Fields (Screenshots 1 & 2) */
 .m3-field {
   position: relative;
 }
@@ -373,7 +377,7 @@ body {
   border: 1.5px solid var(--outline);
   border-radius: 8px;
   padding: 16px 40px 16px 16px;
-  font-size: 1rem;
+  font-size: 0.96rem;
   font-family: inherit;
   appearance: none;
   outline: none;
@@ -416,11 +420,11 @@ body {
 .advanced-panel {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding-left: 28px;
+  gap: 18px;
+  padding-left: 20px;
+  margin-top: 4px;
 }
 
-/* Switch (Screenshot 2) */
 .switch-row {
   display: flex;
   align-items: center;
@@ -470,7 +474,7 @@ body {
 }
 
 .switch-label {
-  font-size: 0.96rem;
+  font-size: 0.94rem;
   color: var(--text-main);
 }
 

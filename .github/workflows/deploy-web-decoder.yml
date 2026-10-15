@@ -1,0 +1,282 @@
+name: Build & Deploy Cavern E-AC3-JOC 22.2 Web Decoder
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Cavern Fork
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8.0 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Pin .NET 8 SDK & Install wasm-tools workload
+        run: |
+          DOTNET8_VER=$(dotnet --list-sdks | grep "^8\.0\." | tail -n 1 | awk '{print $1}')
+          echo "Pinning .NET SDK version to: $DOTNET8_VER"
+          printf '{"sdk":{"version":"%s","rollForward":"latestPatch"}}\n' "$DOTNET8_VER" > global.json
+          dotnet --version
+          dotnet workload install wasm-tools
+
+      - name: Patch Cavern Threading for WASM AOT + SIMD
+        run: |
+          python3 - << 'EOF'
+          import os, re
+
+          shim_code = """using System;
+          using System.Collections.Generic;
+          using System.Runtime.CompilerServices;
+          using System.Threading;
+          using System.Threading.Tasks;
+
+          internal sealed class CavernWasmResetEvent : IDisposable
+          {
+              public bool IsSet { get; private set; }
+              public int SpinCount { get; private set; }
+              public WaitHandle WaitHandle => null!;
+
+              public CavernWasmResetEvent() : this(false, 0) { }
+              public CavernWasmResetEvent(bool initialState) : this(initialState, 0) { }
+              public CavernWasmResetEvent(bool initialState, int spinCount)
+              {
+                  IsSet = initialState;
+                  SpinCount = spinCount;
+              }
+
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public void Set() => IsSet = true;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public void Reset() => IsSet = false;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public void Wait() { }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public void Wait(CancellationToken cancellationToken) { }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public bool Wait(int millisecondsTimeout) => true;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public bool Wait(int millisecondsTimeout, CancellationToken cancellationToken) => true;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public bool Wait(TimeSpan timeout) => true;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public bool Wait(TimeSpan timeout, CancellationToken cancellationToken) => true;
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public void Dispose() { }
+          }
+
+          internal static class CavernWasmSync
+          {
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static ParallelLoopResult For(int fromInclusive, int toExclusive, Action<int> body)
+              {
+                  for (int i = fromInclusive; i < toExclusive; i++) body(i);
+                  return default;
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static ParallelLoopResult For(long fromInclusive, long toExclusive, Action<long> body)
+              {
+                  for (long i = fromInclusive; i < toExclusive; i++) body(i);
+                  return default;
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static ParallelLoopResult For(int fromInclusive, int toExclusive, ParallelOptions options, Action<int> body)
+              {
+                  for (int i = fromInclusive; i < toExclusive; i++) body(i);
+                  return default;
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static ParallelLoopResult ForEach<TSource>(IEnumerable<TSource> source, Action<TSource> body)
+              {
+                  foreach (TSource item in source) body(item);
+                  return default;
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static ParallelLoopResult ForEach<TSource>(IEnumerable<TSource> source, ParallelOptions options, Action<TSource> body)
+              {
+                  foreach (TSource item in source) body(item);
+                  return default;
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static void Invoke(params Action[] actions)
+              {
+                  if (actions == null) return;
+                  for (int i = 0; i < actions.Length; i++) actions[i]?.Invoke();
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static bool QueueUserWorkItem(WaitCallback callBack)
+              {
+                  callBack?.Invoke(null);
+                  return true;
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static bool QueueUserWorkItem(WaitCallback callBack, object state)
+              {
+                  callBack?.Invoke(state);
+                  return true;
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static bool QueueUserWorkItem<TState>(Action<TState> callBack, TState state, bool preferLocal)
+              {
+                  callBack?.Invoke(state);
+                  return true;
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static Task Run(Action action)
+              {
+                  action();
+                  return Task.CompletedTask;
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static Task Run(Action action, CancellationToken token)
+              {
+                  action();
+                  return Task.CompletedTask;
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static Task<TResult> Run<TResult>(Func<TResult> function)
+              {
+                  return Task.FromResult(function());
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static Task<TResult> Run<TResult>(Func<TResult> function, CancellationToken token)
+              {
+                  return Task.FromResult(function());
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static Task StartNew(Action action)
+              {
+                  action();
+                  return Task.CompletedTask;
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static Task<TResult> StartNew<TResult>(Func<TResult> function)
+              {
+                  return Task.FromResult(function());
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static void WaitAll(params Task[] tasks)
+              {
+                  if (tasks == null) return;
+                  for (int i = 0; i < tasks.Length; i++)
+                  {
+                      if (tasks[i] != null && tasks[i].Status == TaskStatus.Created)
+                          tasks[i].RunSynchronously();
+                  }
+              }
+              [MethodImpl(MethodImplOptions.AggressiveInlining)]
+              public static int WaitAny(params Task[] tasks)
+              {
+                  if (tasks == null || tasks.Length == 0) return -1;
+                  for (int i = 0; i < tasks.Length; i++)
+                  {
+                      if (tasks[i] != null && tasks[i].Status == TaskStatus.Created)
+                          tasks[i].RunSynchronously();
+                  }
+                  return 0;
+              }
+          }
+          """
+
+          for proj_dir in ["Cavern", "Cavern.Format"]:
+              if os.path.isdir(proj_dir):
+                  with open(os.path.join(proj_dir, "CavernWasmSync.cs"), "w", encoding="utf-8") as f:
+                      f.write(shim_code)
+
+              for root, _, files in os.walk(proj_dir):
+                  for file in files:
+                      if not file.endswith(".cs") or file == "CavernWasmSync.cs":
+                          continue
+                      path = os.path.join(root, file)
+                      with open(path, "r", encoding="utf-8-sig") as f:
+                          content = f.read()
+
+                      orig = content
+                      content = re.sub(r'\bManualResetEventSlim\b', 'CavernWasmResetEvent', content)
+                      content = re.sub(r'\bParallel\.For\b', 'CavernWasmSync.For', content)
+                      content = re.sub(r'\bParallel\.ForEach\b', 'CavernWasmSync.ForEach', content)
+                      content = re.sub(r'\bParallel\.Invoke\b', 'CavernWasmSync.Invoke', content)
+                      content = re.sub(r'\bThreadPool\.QueueUserWorkItem\b', 'CavernWasmSync.QueueUserWorkItem', content)
+                      content = re.sub(r'\bThreadPool\.UnsafeQueueUserWorkItem\b', 'CavernWasmSync.QueueUserWorkItem', content)
+                      content = re.sub(r'\bTask\.Run\b', 'CavernWasmSync.Run', content)
+                      content = re.sub(r'\bTask\.Factory\.StartNew\b', 'CavernWasmSync.StartNew', content)
+                      content = re.sub(r'\bTask\.WaitAll\b', 'CavernWasmSync.WaitAll', content)
+                      content = re.sub(r'\bTask\.WaitAny\b', 'CavernWasmSync.WaitAny', content)
+
+                      if "Task" in content and "Stopwatch" not in content:
+                          content = re.sub(r'\.Start\(\)', '.RunSynchronously()', content)
+
+                      if content != orig:
+                          with open(path, "w", encoding="utf-8") as f:
+                              f.write(content)
+
+          csproj_path = "CavernWebDecoder/CavernWebDecoder.csproj"
+          if os.path.isfile(csproj_path):
+              with open(csproj_path, "w", encoding="utf-8") as f:
+                  f.write("""<Project Sdk="Microsoft.NET.Sdk.WebAssembly">
+            <PropertyGroup>
+              <TargetFramework>net8.0</TargetFramework>
+              <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
+              <OutputType>Exe</OutputType>
+              <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+              <Nullable>enable</Nullable>
+              <Optimize>true</Optimize>
+              <WasmMainJSPath>wasm-main.js</WasmMainJSPath>
+              <RunAOTCompilation>true</RunAOTCompilation>
+              <WasmEnableSIMD>true</WasmEnableSIMD>
+              <InvariantGlobalization>true</InvariantGlobalization>
+            </PropertyGroup>
+            <ItemGroup>
+              <ProjectReference Include="..\\Cavern\\Cavern.csproj" />
+              <ProjectReference Include="..\\Cavern.Format\\Cavern.Format.csproj" />
+            </ItemGroup>
+          </Project>""")
+          EOF
+
+      - name: Restore workloads & Publish CavernWebDecoder with LLVM AOT & SIMD128
+        run: |
+          dotnet workload restore CavernWebDecoder/CavernWebDecoder.csproj
+          dotnet publish CavernWebDecoder/CavernWebDecoder.csproj -c Release -o release_dist
+
+      - name: Assemble GitHub Pages directory
+        run: |
+          mkdir -p pages_out
+          BOOT_JSON=$(find release_dist -name "blazor.boot.json" | head -n 1)
+          if [ -z "$BOOT_JSON" ]; then
+            BOOT_JSON=$(find release_dist -name "dotnet.js" | head -n 1)
+          fi
+          FRAMEWORK_DIR=$(dirname "$BOOT_JSON")
+          echo "Copying published _framework from: $FRAMEWORK_DIR"
+          cp -r "$FRAMEWORK_DIR" pages_out/_framework
+          cp -r CavernWebDecoder/wwwroot/* pages_out/
+          touch pages_out/.nojekyll
+          ls -lh pages_out/_framework
+
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact to GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages_out
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

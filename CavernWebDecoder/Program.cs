@@ -17,7 +17,7 @@ public partial class Program
     private static Renderer? _renderer;
     private static Listener? _listener;
 
-    private static int _outputChannels = 24;
+    private static int _outputChannels = 16;
     private static int _sampleRate = 48000;
     private static int _pcmBitDepth = 24;
     private static int _updateRate = 256;
@@ -26,6 +26,8 @@ public partial class Program
     private static int _totalFrames = 0;
     private static string _lastLog = "";
     private static string _lastError = "";
+    private static string _currentChannelNamesCsv = "";
+    private static string _currentChannelAbbrCsv = "";
     private static byte[]? _reusableBatchBuffer;
 
     public static void Main()
@@ -50,6 +52,18 @@ public partial class Program
 
     [JSExport]
     public static int GetFramesProcessed() => (int)(_samplesRendered / 1536);
+
+    /// <summary>
+    /// Devuelve los nombres completos de los canales del layout activo separados por coma (ej. "FrontLeft,FrontRight,...")
+    /// </summary>
+    [JSExport]
+    public static string GetChannelNames() => _currentChannelNamesCsv;
+
+    /// <summary>
+    /// Devuelve las etiquetas estándar CICP/Atmos separadas por coma (ej. "L,R,C,LFE,Ls,Rs,Lrs,Rrs,Lw,Rw,TFL,TFR,TSL,TSR,TRL,TRR")
+    /// </summary>
+    [JSExport]
+    public static string GetChannelLabels() => _currentChannelAbbrCsv;
 
     [JSExport]
     public static int InitSession(
@@ -104,7 +118,9 @@ public partial class Program
             _updateRate = (updateRateSamples > 0 && updateRateSamples <= 256) ? updateRateSamples : 256;
             _pcmBitDepth = pcmBitDepth;
 
+            // 1. Configurar primero los canales del Listener usando los prototipos nativos de Cavern
             bool binaural = ConfigureCavernizeLayout(targetLayout);
+            Listener.HeadphoneVirtualizer = binaural;
             _outputChannels = Listener.Channels.Length;
 
             float linearVolume = (float)Math.Pow(10.0, Math.Clamp(gainDb, -40.0, 20.0) / 20.0);
@@ -118,6 +134,7 @@ public partial class Program
                 _ => QualityModes.Perfect
             };
 
+            // 2. Instanciar el Listener después de que Listener.Channels ya tiene la matriz espacial correcta
             _listener = new Listener
             {
                 SampleRate = _sampleRate,
@@ -126,8 +143,8 @@ public partial class Program
                 AudioQuality = quality,
                 LFESeparation = lfeSeparation
             };
-            Listener.HeadphoneVirtualizer = binaural;
 
+            // 3. Vincular todos los objetos del Renderer (Bed + JOC Dynamic Objects)
             foreach (Source source in _renderer.Objects)
             {
                 _listener.AttachSource(source);
@@ -148,7 +165,7 @@ public partial class Program
             _samplesRendered = 0;
             _totalFrames = (int)Math.Max(1, (_totalSamplesPerChannel + 1535) / 1536);
 
-            _lastLog = $"[Cavernize] '{fileName}' | SR: {_reader.SampleRate} Hz | JOC Objects: {_renderer.Objects.Count} | Layout: {targetLayout} ({_outputChannels} ch) | UpdateRate: {_updateRate} | Frames: {_totalFrames}";
+            _lastLog = $"[Cavernize] '{fileName}' | SR: {_reader.SampleRate} Hz | JOC Objects: {_renderer.Objects.Count} | Layout: {targetLayout} ({_outputChannels} ch: {_currentChannelAbbrCsv}) | UpdateRate: {_updateRate} | Frames: {_totalFrames}";
             return _totalFrames;
         }
         catch (Exception ex)
@@ -281,156 +298,226 @@ public partial class Program
     }
 
     /// <summary>
-    /// Configura las coordenadas esféricas exactas de Cavern para cada layout de Dolby Atmos y SMPTE 22.2.
-    /// En Cavern: X = Elevación (-45 = altura/techo, 0 = nivel de oído, +30 = piso), Y = Azimut (- = izquierda, + = derecha).
+    /// Convierte un arreglo de ReferenceChannel en objetos Channel con las coordenadas esféricas exactas
+    /// de ChannelPrototype.Mapping de Cavern, y guarda las etiquetas para exportarlas al frontend.
+    /// </summary>
+    private static void ApplyReferenceLayout(ReferenceChannel[] refChannels, string[] abbrLabels)
+    {
+        Channel[] channels = ChannelPrototype.ToLayout(refChannels);
+        Listener.ReplaceChannels(channels);
+
+        string[] fullNames = new string[refChannels.Length];
+        for (int i = 0; i < refChannels.Length; i++)
+        {
+            fullNames[i] = refChannels[i].ToString();
+        }
+
+        _currentChannelNamesCsv = string.Join(",", fullNames);
+        _currentChannelAbbrCsv = string.Join(",", abbrLabels);
+    }
+
+    /// <summary>
+    /// Configura las matrices de canales exactas de Cavern usando ReferenceChannel oficial para cada layout
+    /// de Dolby Atmos y CICP. Así el renderizador JOC mapea correctamente tanto la cama (Bed) como los objetos 3D.
     /// </summary>
     private static bool ConfigureCavernizeLayout(string layoutKey)
     {
-        switch (layoutKey)
+        string normalized = (layoutKey ?? "9.1.6").Trim().ToLowerInvariant();
+
+        switch (normalized)
         {
             case "virtualizer":
-                Listener.ReplaceChannels(2);
+            case "binaural":
+                ApplyReferenceLayout(
+                    new[] { ReferenceChannel.FrontLeft, ReferenceChannel.FrontRight },
+                    new[] { "L", "R" }
+                );
                 return true;
 
+            case "1.0":
+            case "mono":
+            case "cicp 1":
+                ApplyReferenceLayout(
+                    new[] { ReferenceChannel.FrontCenter },
+                    new[] { "C" }
+                );
+                return false;
+
             case "2.0":
-                Listener.ReplaceChannels(2);
+            case "stereo":
+            case "cicp 2":
+                ApplyReferenceLayout(
+                    new[] { ReferenceChannel.FrontLeft, ReferenceChannel.FrontRight },
+                    new[] { "L", "R" }
+                );
                 return false;
 
             case "4.0":
-                Listener.ReplaceChannels(4);
+            case "quad":
+                ApplyReferenceLayout(
+                    new[] {
+                        ReferenceChannel.FrontLeft, ReferenceChannel.FrontRight,
+                        ReferenceChannel.RearLeft, ReferenceChannel.RearRight
+                    },
+                    new[] { "L", "R", "Ls", "Rs" }
+                );
                 return false;
 
             case "5.1":
-                Listener.ReplaceChannels(6);
+            case "cicp 6":
+                // En Cavern, el estándar 5.1 usa RearLeft/RearRight (±110°) o SideLeft/SideRight
+                // Usamos el matriz estándar de 6 canales de Cavern para recibir el Bed completo
+                ApplyReferenceLayout(
+                    new[] {
+                        ReferenceChannel.FrontLeft, ReferenceChannel.FrontRight,
+                        ReferenceChannel.FrontCenter, ReferenceChannel.ScreenLFE,
+                        ReferenceChannel.SideLeft, ReferenceChannel.SideRight
+                    },
+                    new[] { "L", "R", "C", "LFE", "Ls", "Rs" }
+                );
                 return false;
 
             case "7.1":
-                // Orden SMPTE/Atmos: L, R, C, LFE, Ls (Side Ch 5), Rs (Side Ch 6), Lrs (Rear Ch 7), Rrs (Rear Ch 8)
-                Listener.ReplaceChannels(new Channel[]
-                {
-                    new Channel(0, -30),       // Ch 1: L
-                    new Channel(0, 30),        // Ch 2: R
-                    new Channel(0, 0),         // Ch 3: C
-                    new Channel(0, 0, true),   // Ch 4: LFE
-                    new Channel(0, -90),       // Ch 5: Ls (Side Surround Left - Hidden Vocals / Bed)
-                    new Channel(0, 90),        // Ch 6: Rs (Side Surround Right - Hidden Vocals / Bed)
-                    new Channel(0, -150),      // Ch 7: Lrs (Rear Surround Left)
-                    new Channel(0, 150)        // Ch 8: Rrs (Rear Surround Right)
-                });
+            case "cicp 12":
+                // Orden SMPTE/Atmos: L, R, C, LFE, Ls (Side), Rs (Side), Lrs (Rear), Rrs (Rear)
+                ApplyReferenceLayout(
+                    new[] {
+                        ReferenceChannel.FrontLeft, ReferenceChannel.FrontRight,
+                        ReferenceChannel.FrontCenter, ReferenceChannel.ScreenLFE,
+                        ReferenceChannel.SideLeft, ReferenceChannel.SideRight,
+                        ReferenceChannel.RearLeft, ReferenceChannel.RearRight
+                    },
+                    new[] { "L", "R", "C", "LFE", "Ls", "Rs", "Lrs", "Rrs" }
+                );
                 return false;
 
             case "5.1.2":
-                Listener.ReplaceChannels(new Channel[]
-                {
-                    new Channel(0, -30),       // Ch 1: L
-                    new Channel(0, 30),        // Ch 2: R
-                    new Channel(0, 0),         // Ch 3: C
-                    new Channel(0, 0, true),   // Ch 4: LFE
-                    new Channel(0, -90),       // Ch 5: Ls
-                    new Channel(0, 90),        // Ch 6: Rs
-                    new Channel(-45, -90),     // Ch 7: TSL / TML
-                    new Channel(-45, 90)       // Ch 8: TSR / TMR
-                });
+            case "cicp 14":
+                ApplyReferenceLayout(
+                    new[] {
+                        ReferenceChannel.FrontLeft, ReferenceChannel.FrontRight,
+                        ReferenceChannel.FrontCenter, ReferenceChannel.ScreenLFE,
+                        ReferenceChannel.SideLeft, ReferenceChannel.SideRight,
+                        ReferenceChannel.TopSideLeft, ReferenceChannel.TopSideRight
+                    },
+                    new[] { "L", "R", "C", "LFE", "Ls", "Rs", "TSL", "TSR" }
+                );
                 return false;
 
             case "5.1.4":
-                Listener.ReplaceChannels(new Channel[]
-                {
-                    new Channel(0, -30),       // Ch 1: L
-                    new Channel(0, 30),        // Ch 2: R
-                    new Channel(0, 0),         // Ch 3: C
-                    new Channel(0, 0, true),   // Ch 4: LFE
-                    new Channel(0, -90),       // Ch 5: Ls
-                    new Channel(0, 90),        // Ch 6: Rs
-                    new Channel(-45, -30),     // Ch 7: TFL
-                    new Channel(-45, 30),      // Ch 8: TFR
-                    new Channel(-45, -150),    // Ch 9: TRL
-                    new Channel(-45, 150)      // Ch 10: TRR
-                });
+            case "cicp 16":
+                ApplyReferenceLayout(
+                    new[] {
+                        ReferenceChannel.FrontLeft, ReferenceChannel.FrontRight,
+                        ReferenceChannel.FrontCenter, ReferenceChannel.ScreenLFE,
+                        ReferenceChannel.SideLeft, ReferenceChannel.SideRight,
+                        ReferenceChannel.TopFrontLeft, ReferenceChannel.TopFrontRight,
+                        ReferenceChannel.TopRearLeft, ReferenceChannel.TopRearRight
+                    },
+                    new[] { "L", "R", "C", "LFE", "Ls", "Rs", "TFL", "TFR", "TRL", "TRR" }
+                );
                 return false;
 
             case "7.1.2":
-                Listener.ReplaceChannels(new Channel[]
-                {
-                    new Channel(0, -30),       // Ch 1: L
-                    new Channel(0, 30),        // Ch 2: R
-                    new Channel(0, 0),         // Ch 3: C
-                    new Channel(0, 0, true),   // Ch 4: LFE
-                    new Channel(0, -90),       // Ch 5: Ls
-                    new Channel(0, 90),        // Ch 6: Rs
-                    new Channel(0, -150),      // Ch 7: Lrs
-                    new Channel(0, 150),       // Ch 8: Rrs
-                    new Channel(-45, -90),     // Ch 9: TSL / TML
-                    new Channel(-45, 90)       // Ch 10: TSR / TMR
-                });
+                ApplyReferenceLayout(
+                    new[] {
+                        ReferenceChannel.FrontLeft, ReferenceChannel.FrontRight,
+                        ReferenceChannel.FrontCenter, ReferenceChannel.ScreenLFE,
+                        ReferenceChannel.SideLeft, ReferenceChannel.SideRight,
+                        ReferenceChannel.RearLeft, ReferenceChannel.RearRight,
+                        ReferenceChannel.TopSideLeft, ReferenceChannel.TopSideRight
+                    },
+                    new[] { "L", "R", "C", "LFE", "Ls", "Rs", "Lrs", "Rrs", "TSL", "TSR" }
+                );
                 return false;
 
             case "7.1.4":
-                Listener.ReplaceChannels(new Channel[]
-                {
-                    new Channel(0, -30),       // Ch 1: L
-                    new Channel(0, 30),        // Ch 2: R
-                    new Channel(0, 0),         // Ch 3: C
-                    new Channel(0, 0, true),   // Ch 4: LFE
-                    new Channel(0, -90),       // Ch 5: Ls (Side Surround Left)
-                    new Channel(0, 90),        // Ch 6: Rs (Side Surround Right)
-                    new Channel(0, -150),      // Ch 7: Lrs (Rear Surround Left)
-                    new Channel(0, 150),       // Ch 8: Rrs (Rear Surround Right)
-                    new Channel(-45, -30),     // Ch 9: TFL
-                    new Channel(-45, 30),      // Ch 10: TFR
-                    new Channel(-45, -150),    // Ch 11: TRL
-                    new Channel(-45, 150)      // Ch 12: TRR
-                });
+            case "cicp 19":
+                ApplyReferenceLayout(
+                    new[] {
+                        ReferenceChannel.FrontLeft, ReferenceChannel.FrontRight,
+                        ReferenceChannel.FrontCenter, ReferenceChannel.ScreenLFE,
+                        ReferenceChannel.SideLeft, ReferenceChannel.SideRight,
+                        ReferenceChannel.RearLeft, ReferenceChannel.RearRight,
+                        ReferenceChannel.TopFrontLeft, ReferenceChannel.TopFrontRight,
+                        ReferenceChannel.TopRearLeft, ReferenceChannel.TopRearRight
+                    },
+                    new[] { "L", "R", "C", "LFE", "Ls", "Rs", "Lrs", "Rrs", "TFL", "TFR", "TRL", "TRR" }
+                );
                 return false;
 
             case "7.1.6":
-                Listener.ReplaceChannels(new Channel[]
-                {
-                    new Channel(0, -30),       // Ch 1: L
-                    new Channel(0, 30),        // Ch 2: R
-                    new Channel(0, 0),         // Ch 3: C
-                    new Channel(0, 0, true),   // Ch 4: LFE
-                    new Channel(0, -90),       // Ch 5: Ls
-                    new Channel(0, 90),        // Ch 6: Rs
-                    new Channel(0, -150),      // Ch 7: Lrs
-                    new Channel(0, 150),       // Ch 8: Rrs
-                    new Channel(-45, -30),     // Ch 9: TFL
-                    new Channel(-45, 30),      // Ch 10: TFR
-                    new Channel(-45, -90),     // Ch 11: TML / TSL
-                    new Channel(-45, 90),      // Ch 12: TMR / TSR
-                    new Channel(-45, -150),    // Ch 13: TRL
-                    new Channel(-45, 150)      // Ch 14: TRR
-                });
+                ApplyReferenceLayout(
+                    new[] {
+                        ReferenceChannel.FrontLeft, ReferenceChannel.FrontRight,
+                        ReferenceChannel.FrontCenter, ReferenceChannel.ScreenLFE,
+                        ReferenceChannel.SideLeft, ReferenceChannel.SideRight,
+                        ReferenceChannel.RearLeft, ReferenceChannel.RearRight,
+                        ReferenceChannel.TopFrontLeft, ReferenceChannel.TopFrontRight,
+                        ReferenceChannel.TopSideLeft, ReferenceChannel.TopSideRight,
+                        ReferenceChannel.TopRearLeft, ReferenceChannel.TopRearRight
+                    },
+                    new[] { "L", "R", "C", "LFE", "Ls", "Rs", "Lrs", "Rrs", "TFL", "TFR", "TSL", "TSR", "TRL", "TRR" }
+                );
                 return false;
 
-            case "9.1.6":
-                // Layout 9.1.6 Dolby Atmos exacto (16 canales):
-                // Canales 5 y 6 = Ls / Rs (Side Surrounds), Canales 7 y 8 = Lrs / Rrs (Rear Surrounds), Canales 9 y 10 = Lw / Rw (Wides)
-                Listener.ReplaceChannels(new Channel[]
-                {
-                    new Channel(0, -30),       // Ch 1: L (Front Left)
-                    new Channel(0, 30),        // Ch 2: R (Front Right)
-                    new Channel(0, 0),         // Ch 3: C (Center)
-                    new Channel(0, 0, true),   // Ch 4: LFE
-                    new Channel(0, -90),       // Ch 5: Ls / SL (Side Surround Left)
-                    new Channel(0, 90),        // Ch 6: Rs / SR (Side Surround Right)
-                    new Channel(0, -150),      // Ch 7: Lrs / BL (Rear Surround Left)
-                    new Channel(0, 150),       // Ch 8: Rrs / BR (Rear Surround Right)
-                    new Channel(0, -60),       // Ch 9: Lw / WL (Wide Left)
-                    new Channel(0, 60),        // Ch 10: Rw / WR (Wide Right)
-                    new Channel(-45, -30),     // Ch 11: TFL (Top Front Left)
-                    new Channel(-45, 30),      // Ch 12: TFR (Top Front Right)
-                    new Channel(-45, -90),     // Ch 13: TML / TSL (Top Side Left)
-                    new Channel(-45, 90),      // Ch 14: TMR / TSR (Top Side Right)
-                    new Channel(-45, -150),    // Ch 15: TRL (Top Rear Left)
-                    new Channel(-45, 150)      // Ch 16: TRR (Top Rear Right)
-                });
+            case "9.1.4":
+                ApplyReferenceLayout(
+                    new[] {
+                        ReferenceChannel.FrontLeft, ReferenceChannel.FrontRight,
+                        ReferenceChannel.FrontCenter, ReferenceChannel.ScreenLFE,
+                        ReferenceChannel.SideLeft, ReferenceChannel.SideRight,
+                        ReferenceChannel.RearLeft, ReferenceChannel.RearRight,
+                        ReferenceChannel.WideLeft, ReferenceChannel.WideRight,
+                        ReferenceChannel.TopFrontLeft, ReferenceChannel.TopFrontRight,
+                        ReferenceChannel.TopRearLeft, ReferenceChannel.TopRearRight
+                    },
+                    new[] { "L", "R", "C", "LFE", "Ls", "Rs", "Lrs", "Rrs", "Lw", "Rw", "TFL", "TFR", "TRL", "TRR" }
+                );
                 return false;
 
             case "22.2":
+            case "cicp 13":
+                // SMPTE 2036-2 / ITU-R BS.2051 System H (24 canales: 11/11.2)
+                // NOTA: En pistas Dolby Atmos (E-AC-3 JOC), los canales de piso (Bottom) y LFE2 suelen venir vacíos
+                // porque Atmos codifica camas y objetos desde el nivel del oído (0°) hacia el techo (-45° / -90°).
+                ApplyReferenceLayout(
+                    new[] {
+                        ReferenceChannel.FrontLeft, ReferenceChannel.FrontRight, ReferenceChannel.FrontCenter,
+                        ReferenceChannel.ScreenLFE, ReferenceChannel.RearLeft, ReferenceChannel.RearRight,
+                        ReferenceChannel.FrontLeftCenter, ReferenceChannel.FrontRightCenter, ReferenceChannel.RearCenter,
+                        ReferenceChannel.SideLeft, ReferenceChannel.SideRight,
+                        ReferenceChannel.TopFrontLeft, ReferenceChannel.TopFrontRight, ReferenceChannel.TopFrontCenter,
+                        ReferenceChannel.TopCenter, ReferenceChannel.TopRearLeft, ReferenceChannel.TopRearRight,
+                        ReferenceChannel.TopSideLeft, ReferenceChannel.TopSideRight, ReferenceChannel.TopRearCenter,
+                        ReferenceChannel.Subwoofer, ReferenceChannel.BottomFrontLeft,
+                        ReferenceChannel.BottomFrontRight, ReferenceChannel.BottomFrontCenter
+                    },
+                    new[] {
+                        "FL", "FR", "FC", "LFE1", "BL", "BR", "FLc", "FRc", "BC", "SiL", "SiR",
+                        "TpFL", "TpFR", "TpFC", "TpC", "TpBL", "TpBR", "TpSiL", "TpSiR", "TpBC",
+                        "LFE2", "BtFL", "BtFR", "BtFC"
+                    }
+                );
+                return false;
+
+            case "9.1.6":
             default:
-                // 22.2 Surround SMPTE 2036-2 / ITU-R BS.2051 System H (24 canales: 11/11.2)
-                Listener.ReplaceChannels(24);
+                // Layout 9.1.6 Dolby Atmos por defecto (16 canales) usando los prototipos nativos de Cavern:
+                // Así evitamos que un nombre no reconocido caiga en 22.2 (donde los canales de piso salen mudos).
+                ApplyReferenceLayout(
+                    new[] {
+                        ReferenceChannel.FrontLeft, ReferenceChannel.FrontRight,
+                        ReferenceChannel.FrontCenter, ReferenceChannel.ScreenLFE,
+                        ReferenceChannel.SideLeft, ReferenceChannel.SideRight,
+                        ReferenceChannel.RearLeft, ReferenceChannel.RearRight,
+                        ReferenceChannel.WideLeft, ReferenceChannel.WideRight,
+                        ReferenceChannel.TopFrontLeft, ReferenceChannel.TopFrontRight,
+                        ReferenceChannel.TopSideLeft, ReferenceChannel.TopSideRight,
+                        ReferenceChannel.TopRearLeft, ReferenceChannel.TopRearRight
+                    },
+                    new[] { "L", "R", "C", "LFE", "Ls", "Rs", "Lrs", "Rrs", "Lw", "Rw", "TFL", "TFR", "TSL", "TSR", "TRL", "TRR" }
+                );
                 return false;
         }
     }

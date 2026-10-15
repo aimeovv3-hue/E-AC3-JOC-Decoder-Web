@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>E-AC3-JOC 3D Web Decoder • Cavernize</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="app-container">
+    <h1 class="app-title">E-AC3-JOC 3D Web<br>Decoder</h1>
+
+    <!-- Real-time FPS Badge -->
+    <div id="fpsBadge" class="fps-badge hidden" aria-live="polite">
+      <svg class="fps-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/>
+        <path d="M12 4a8 8 0 0 0-8 8c0 2.2.9 4.2 2.3 5.7h11.4c1.4-1.5 2.3-3.5 2.3-5.7a8 8 0 0 0-8-8Z"/>
+        <path d="m12 12 3.5-3.5"/>
+      </svg>
+      <div class="fps-text">
+        <div class="fps-value"><span id="fpsNumber">0.0</span> fps</div>
+        <div class="fps-label">Real-time speed</div>
+      </div>
+    </div>
+
+    <!-- Error Banner (shown if WASM or file demuxing encounters an error) -->
+    <div id="errorBanner" class="error-banner hidden" role="alert"></div>
+
+    <!-- Main Input & Queue Card -->
+    <section class="card">
+      <input type="file" id="fileInput" multiple accept=".ec3,.eac3,.ac3,.m4a,.mp4,.mkv,.mka,.webm,.wav" hidden />
+
+      <div id="dropzone" class="dropzone" role="button" tabindex="0">
+        <div id="dropzoneEmpty" class="dropzone-content">
+          <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="12" y1="18" x2="12" y2="12"/>
+            <polyline points="9 15 12 12 15 15"/>
+          </svg>
+          <div class="dropzone-texts">
+            <div class="dropzone-title">Select input files</div>
+            <div class="dropzone-subtitle">Drag &amp; drop or click to browse</div>
+          </div>
+        </div>
+
+        <div id="dropzoneSelected" class="dropzone-content selected-mode hidden">
+          <svg class="dropzone-icon-small" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <polyline points="4 7 7 10 11 5"/>
+            <line x1="14" y1="8" x2="20" y2="8"/>
+            <polyline points="4 16 7 19 11 14"/>
+            <line x1="14" y1="17" x2="20" y2="17"/>
+          </svg>
+          <span id="selectedCountText" class="selected-count-text">1 file selected</span>
+        </div>
+      </div>
+
+      <div id="queueContainer" class="queue-container hidden">
+        <div id="queueList" class="queue-list"></div>
+
+        <div class="queue-actions">
+          <button id="startBtn" class="btn-primary-pill" title="Start Cavernize rendering">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="7 5 18 12 7 19 7 5"/>
+            </svg>
+          </button>
+
+          <button id="cancelBtn" class="btn-cancel-pill hidden">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2">
+              <line x1="18" y1="6" x2="6" y2="18"/>
+              <line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+            <span>Cancel</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="local-info">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">
+          <circle cx="12" cy="12" r="9"/>
+          <line x1="12" y1="16" x2="12" y2="12"/>
+          <line x1="12" y1="8" x2="12.01" y2="8"/>
+        </svg>
+        <span>All files are processed locally in your browser</span>
+      </div>
+    </section>
+
+    <!-- Decoded Audio Files Card -->
+    <section id="decodedSection" class="card hidden">
+      <div class="decoded-header">
+        <div class="decoded-header-left">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+            <polyline points="9 14 11 16 15 12"/>
+          </svg>
+          <h2>Decoded audio files</h2>
+        </div>
+        <button id="clearDecodedBtn" class="icon-btn" title="Clear decoded list">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="4" y1="7" x2="20" y2="7"/>
+            <line x1="4" y1="12" x2="16" y2="12"/>
+            <line x1="4" y1="17" x2="12" y2="17"/>
+          </svg>
+        </button>
+      </div>
+      <div id="decodedList" class="decoded-list"></div>
+    </section>
+
+    <!-- Cavernize Render Target & Engine Settings Card -->
+    <section class="card settings-card">
+      <div class="m3-field">
+        <label class="m3-floating-label">Target output layout (Cavernize)</label>
+        <input type="hidden" id="renderTargetSelect" value="9.1.6" />
+
+        <div id="layoutDropdownContainer" class="custom-select-container">
+          <div id="layoutDropdownMenu" class="custom-dropdown-menu hidden" role="listbox"></div>
+
+          <button type="button" id="layoutDropdownTrigger" class="m3-select custom-select-trigger" aria-haspopup="listbox" aria-expanded="false">
+            <div class="trigger-text-wrap">
+              <span id="selectedLayoutTitle" class="trigger-title">9.1.6 • 9/6.1</span>
+              <span id="selectedLayoutChannels" class="trigger-subtitle">Cavern 16ch – FL, FR, FC, LFE, RL, RR, SL, SR, WL, WR, TFL, TFR, TSL, TSR, TRL, TRR</span>
+            </div>
+            <svg class="select-arrow" viewBox="0 0 24 24" width="18" height="18">
+              <path d="M7 10l5 5 5-5z" fill="currentColor"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <button id="advancedToggle" class="advanced-toggle" aria-expanded="false">
+        <span>Advanced options</span>
+        <svg id="advancedChevron" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </button>
+
+      <div id="advancedPanel" class="advanced-panel hidden">
+        <!-- Cavernize Bit Depth -->
+        <div class="m3-field">
+          <label for="pcmBitDepth" class="m3-floating-label">Bit depth (Cavernize export)</label>
+          <div class="select-wrapper">
+            <select id="pcmBitDepth" class="m3-select-box">
+              <option value="24" selected>24-bit integer PCM (Default)</option>
+              <option value="16">16-bit integer PCM</option>
+              <option value="32">32-bit float PCM (IEEE Float)</option>
+              <option value="8">8-bit integer PCM</option>
+            </select>
+            <svg class="select-arrow" viewBox="0 0 24 24" width="18" height="18">
+              <path d="M7 10l5 5 5-5z" fill="currentColor"/>
+            </svg>
+          </div>
+        </div>
+
+        <!-- Cavernize Sample Rate -->
+        <div class="m3-field">
+          <label for="outputSampleRate" class="m3-floating-label">Sample rate (Listener.SampleRate)</label>
+          <div class="select-wrapper">
+            <select id="outputSampleRate" class="m3-select-box">
+              <option value="0" selected>Original source rate (48000 Hz)</option>
+              <option value="44100">44100 Hz</option>
+              <option value="48000">48000 Hz</option>
+              <option value="96000">96000 Hz</option>
+            </select>
+            <svg class="select-arrow" viewBox="0 0 24 24" width="18" height="18">
+              <path d="M7 10l5 5 5-5z" fill="currentColor"/>
+            </svg>
+          </div>
+        </div>
+
+        <!-- Cavernize Update Rate -->
+        <div class="m3-field">
+          <label for="updateRateSelect" class="m3-floating-label">Update rate (Spatial block size)</label>
+          <div class="select-wrapper">
+            <select id="updateRateSelect" class="m3-select-box">
+              <option value="256" selected>256 samples (1 E-AC-3 block • Default)</option>
+              <option value="64">64 samples (High precision)</option>
+              <option value="128">128 samples (Fine precision)</option>
+            </select>
+            <svg class="select-arrow" viewBox="0 0 24 24" width="18" height="18">
+              <path d="M7 10l5 5 5-5z" fill="currentColor"/>
+            </svg>
+          </div>
+        </div>
+
+        <!-- Cavernize Audio Quality -->
+        <div class="m3-field">
+          <label for="audioQualitySelect" class="m3-floating-label">Audio quality (Listener.AudioQuality)</label>
+          <div class="select-wrapper">
+            <select id="audioQualitySelect" class="m3-select-box">
+              <option value="2" selected>High (Cavernize default)</option>
+              <option value="3">Perfect</option>
+              <option value="1">Medium</option>
+              <option value="0">Low</option>
+            </select>
+            <svg class="select-arrow" viewBox="0 0 24 24" width="18" height="18">
+              <path d="M7 10l5 5 5-5z" fill="currentColor"/>
+            </svg>
+          </div>
+        </div>
+
+        <!-- Cavernize Default Loudness / Volume Gain -->
+        <div class="m3-field">
+          <label for="cavernGainDb" class="m3-floating-label">Output volume / Loudness gain (dB)</label>
+          <input type="number" id="cavernGainDb" class="m3-input-box" value="0.0" step="0.5" min="-40" max="20" />
+        </div>
+
+        <!-- Official Cavernize Surround Swap (-ss) -->
+        <label class="switch-row" for="surroundSwapSwitch">
+          <input type="checkbox" id="surroundSwapSwitch" checked />
+          <span class="m3-switch"></span>
+          <span class="switch-label">Swap side &amp; rear surrounds (SL/SR on Ch 5/6)</span>
+        </label>
+
+        <label class="switch-row" for="lfeSeparationSwitch">
+          <input type="checkbox" id="lfeSeparationSwitch" />
+          <span class="m3-switch"></span>
+          <span class="switch-label">LFE low-pass separation</span>
+        </label>
+
+        <label class="switch-row" for="stderrSwitch">
+          <input type="checkbox" id="stderrSwitch" checked />
+          <span class="m3-switch"></span>
+          <span class="switch-label">Print Cavernize logs</span>
+        </label>
+
+        <button id="loadErudaBtn" type="button" class="btn-eruda">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="8" y="6" width="8" height="14" rx="4"/>
+            <path d="m19 7-3 2"/>
+            <path d="m5 7 3 2"/>
+            <path d="m19 19-3-2"/>
+            <path d="m5 19 3-2"/>
+            <path d="M20 13h-4"/>
+            <path d="M4 13h4"/>
+            <path d="m10 4 1 2"/>
+            <path d="m14 4-1 2"/>
+          </svg>
+          <span>Load Eruda</span>
+        </button>
+      </div>
+    </section>
+
+    <footer class="app-footer">
+      This website uses <a href="https://github.com/VoidXH/Cavern" target="_blank" rel="noopener">Cavern (Cavernize)</a> distributed under the
+      <a href="https://github.com/VoidXH/Cavern/blob/master/LICENSE.md" target="_blank" rel="noopener">MIT License</a>.
+      See <a href="https://github.com/VoidXH/Cavern/blob/master/LICENSE.md" target="_blank" rel="noopener">LICENSE</a> for more information.
+    </footer>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
